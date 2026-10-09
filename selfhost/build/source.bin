@@ -1201,9 +1201,6 @@ $08000000 constant signal.flag.onstack
 \ Native base address of the candidate image being compiled.
 variable build.base
 
-\ Runtime hook called with a sealed candidate before editor publication.
-variable editor.checkpoint
-
 \ Sealed image currently selected by the editor, or zero for the startup image.
 variable editor.image
 
@@ -3752,7 +3749,6 @@ variable input.resume
   parser.length @ page.align parser.length @ - erase
   image.finish
   editor.stage @ image.seal
-  editor.checkpoint @ dup if editor.stage @ swap execute else drop then
   editor.stage @ editor.image !
   input.position @ editor.source.start !
   0 editor.stage ! 0 editor.ready !
@@ -5511,7 +5507,7 @@ unit.end
 12288   constant snapshot.wrapper.size
 
 \ Magic identifying the parent-linked binary snapshot format.
-$3250414e53485446 constant snapshot.magic
+$2050414e53485446 constant snapshot.magic
 
 \ Patch header: magic | parent ID | parent bytes | image bytes | span count.
 \ Each following span is: image offset | byte count | replacement bytes.
@@ -5555,6 +5551,18 @@ $3250414e53485446 constant snapshot.magic
 \ Resolve an empty exec pathname through the supplied descriptor.
 4096    constant execveat.empty.path
 
+\ Linux syscall for enumerating directory entries in their 64-bit layout.
+217     constant syscall.getdents
+
+\ Offset of the two-byte record length in a Linux dirent64.
+16      constant directory.length.offset
+
+\ Offset of the NUL-terminated filename in a Linux dirent64.
+19      constant directory.name.offset
+
+\ Minimum directory record size containing an eight-digit revision and NUL.
+28      constant directory.snapshot.minimum
+
 \ Open flags for exclusive, close-on-exec checkpoint files.
 524481  constant snapshot.create.flags
 
@@ -5593,9 +5601,6 @@ variable snapshot.read.length
 
 \ Temporary zero-terminated exec argument naming the validator command.
 variable snapshot.command
-
-\ True while automatic publication checkpoints are enabled.
-variable snapshot.enabled
 
 \ Collection directory for the operation in progress.
 variable snapshot.collection.length
@@ -5654,6 +5659,48 @@ variable snapshot.changed.end
 \ Anonymous executable descriptor plus one; zero means none is owned.
 variable snapshot.memfd
 
+
+\ Owned description of an explicit snapshot, separate from its canonical image.
+variable snapshot.comment.address
+
+\ Bytes in the description captured from the rest of the input line.
+variable snapshot.comment.length
+
+\ Allocated array of committed revision IDs for the snapshot browser.
+variable snapshots.list
+
+\ Temporary directory-record buffer owned by the browser.
+variable snapshots.entries
+
+\ Directory descriptor plus one, or zero when closed.
+variable snapshots.fd
+
+\ Number of committed revisions in the browser.
+variable snapshots.count
+
+\ Zero-based selected revision in the sorted browser list.
+variable snapshots.selected
+
+\ First visible revision in the snapshot viewport.
+variable snapshots.first
+
+\ Maximum number of snapshot rows fitting the terminal.
+variable snapshots.rows
+
+\ Byte offset of the directory record being scanned.
+variable snapshots.cursor
+
+\ Number of valid directory bytes in the current batch.
+variable snapshots.bytes
+
+\ Length of the current Linux directory record.
+variable snapshots.record.size
+
+\ Revision ID decoded from the current directory name.
+variable snapshots.id
+
+\ Index used for sorting or rendering snapshot rows.
+variable snapshots.index
 
 \ Return the current checkpoint pathname buffer.
 : snapshot.current snapshot.buffers @ ;
@@ -6198,6 +6245,10 @@ variable elf.assembler.cursor
   snapshot.parent.image @ if snapshot.parent.image @ image.free 0 snapshot.parent.image ! then
   -1 snapshot.pending ! snapshot.saved dup string.length snapshot.reconstruct
   snapshot.image @ snapshot.result @ image.equal? snapshot.need snapshot.check
+  snapshot.comment.length @ if
+    s" /comment" snapshot.filename 384 snapshot.create
+    snapshot.comment.address @ snapshot.comment.length @ snapshot.write snapshot.finish
+  then
   s" /complete" snapshot.filename 384 snapshot.create
   snapshot.magic snapshot.wrapper ! snapshot.wrapper 8 snapshot.write snapshot.finish
   snapshot.sync.directory
@@ -6205,25 +6256,36 @@ variable elf.assembler.cursor
   snapshot.saved dup string.length dup snapshot.length ! 1+ snapshot.current swap move
   snapshot.release ;
 
-\ Save a project root before its first child, then commit the candidate image.
+\ Save one candidate as a root or as a child of the selected project snapshot.
 : snapshot.publish ( image -- )
-  snapshot.enabled @ 0= if drop ; then
   >r snapshot.init snapshot.project
   snapshot.length @ snapshot.collection.length @ 9 + = if
     snapshot.current snapshot.collection snapshot.collection.length @ bytes.equal? 0= if 0 snapshot.length ! then
   else 0 snapshot.length ! then
   snapshot.length @ 0= if
-    -1 snapshot.parent.id ! editor.current snapshot.image ! snapshot.persist
+    -1 snapshot.parent.id ! r> snapshot.image ! snapshot.persist ;
   then
   0 snapshot.pending ! snapshot.current snapshot.length @ snapshot.reconstruct
   snapshot.result @ snapshot.parent.image ! 0 snapshot.result !
   snapshot.target.id @ snapshot.parent.id !
   r> snapshot.image ! snapshot.persist ;
 
-\ Save and verify the current definitions and source, then display the snapshot path.
+\ Release an explicit snapshot's owned description after saving or recovery.
+: snapshot.comment.release
+  snapshot.comment.address @ if snapshot.comment.address @ c.string.free 0 snapshot.comment.address ! then
+  0 snapshot.comment.length ! ;
+
+\ Capture the rest of the input line as descriptive text without interpreting it.
+: snapshot.comment.parse
+  snapshot.comment.release source.space.skip
+  parser.length @ parser.position @ - dup page.size 1- <= snapshot.need
+  dup snapshot.comment.length ! parser.source @ parser.position @ + swap c.string snapshot.comment.address !
+  parser.length @ dup parser.position ! input.position ! ;
+
+\ Save a verified snapshot with the rest of this line as its optional description.
 : snapshot
-  editor.stage @ 0= require editor.current snapshot.publish
-  s" Snapshot: " type snapshot.current snapshot.length @ type cr ;
+  editor.stage @ 0= require snapshot.comment.parse editor.current snapshot.publish
+  snapshot.comment.release s" Snapshot: " type snapshot.current snapshot.length @ type cr ;
 
 \ Save the current system using the original checkpoint command name.
 : checkpoint snapshot ;
@@ -6245,7 +6307,7 @@ variable elf.assembler.cursor
 : source.save snapshot.path.parse source.write ;
 
 \ Initialize project snapshot services without retaining runtime state from disk.
-: snapshot.boot snapshot.init -1 snapshot.enabled ! ;
+: snapshot.boot snapshot.init ;
 
 \ Verify a committed snapshot using its own compiler without adopting it.
 : snapshot.verify
@@ -6275,6 +6337,140 @@ variable elf.assembler.cursor
   snapshot.work snapshot.target 15 + snapshot.work.length @ move
   snapshot.target snapshot.work.length @ 15 + c.string snapshot.command !
   snapshot.memory.exec snapshot.ok ;
+
+\ Release directory and browser storage after normal exit or input recovery.
+: snapshots.release
+  snapshots.fd @ if snapshots.fd @ 1- 0 0 0 0 0 3 syscall6 drop 0 snapshots.fd ! then
+  snapshots.entries @ if snapshots.entries @ image.free 0 snapshots.entries ! then
+  snapshots.list @ if snapshots.list @ image.free 0 snapshots.list ! then ;
+
+\ Read a revision's commit marker; incomplete or inaccessible revisions are omitted.
+: snapshots.complete? ( -- flag )
+  s" /complete" snapshot.filename
+  snapshot.file 524288 0 0 0 0 syscall.open syscall6 dup 0 < if drop 0 ; then
+  snapshot.fd ! snapshot.fd @ snapshot.wrapper 9 0 0 0 0 syscall6
+  8 = snapshot.wrapper @ snapshot.magic = and snapshot.close ;
+
+\ Decode exactly eight hexadecimal digits from a directory entry name.
+: snapshots.name? ( address -- flag )
+  dup 8 + c@ if drop 0 ; then 0 snapshots.id ! 8
+  begin dup while
+    >r dup c@ dup 48 >= over 57 <= and if 48 - else
+      dup 97 >= over 102 <= and 0= if drop drop r> drop 0 ; then 87 -
+    then snapshots.id @ 4 lshift + snapshots.id ! 1+ r> 1-
+  repeat 2drop -1 ;
+
+\ Insert a committed revision into descending numeric order, newest first.
+: snapshots.insert
+  snapshots.count @ image.capacity 8 / < snapshot.need
+  snapshots.count @ snapshots.index !
+  begin snapshots.index @ while
+    snapshots.list @ snapshots.index @ 1- cells + @ snapshots.id @ >= if
+      snapshots.id @ snapshots.list @ snapshots.index @ cells + ! 1 snapshots.count +! ;
+    then
+    snapshots.list @ snapshots.index @ 1- cells + @ snapshots.list @ snapshots.index @ cells + !
+    -1 snapshots.index +!
+  repeat snapshots.id @ snapshots.list @ ! 1 snapshots.count +! ;
+
+\ Collect committed revisions using Linux directory records without a shell.
+: snapshots.scan
+  snapshot.init snapshot.project image.new snapshots.entries ! image.new snapshots.list !
+  0 snapshots.count !
+  snapshot.collection snapshot.directory.flags 0 0 0 0 syscall.open syscall6
+  dup 0 >= snapshot.need 1+ snapshots.fd !
+  begin
+    snapshots.fd @ 1- snapshots.entries @ page.size 0 0 0 syscall.getdents syscall6
+    dup syscall.interrupted = if drop else
+      dup 0 >= snapshot.need dup 0= if drop
+        snapshots.fd @ 1- 0 0 0 0 0 3 syscall6 drop 0 snapshots.fd ! ;
+      then snapshots.bytes ! 0 snapshots.cursor !
+      begin snapshots.cursor @ snapshots.bytes @ < while
+        snapshots.bytes @ snapshots.cursor @ - directory.name.offset >= snapshot.need
+        snapshots.entries @ snapshots.cursor @ + directory.length.offset +
+        dup c@ swap 1+ c@ 8 lshift or snapshots.record.size !
+        snapshots.record.size @ directory.name.offset > snapshot.need
+        snapshots.record.size @ snapshots.bytes @ snapshots.cursor @ - <= snapshot.need
+        snapshots.record.size @ directory.snapshot.minimum >= if
+          snapshots.entries @ snapshots.cursor @ + directory.name.offset + snapshots.name? if
+            snapshots.id @ snapshot.node snapshots.complete? if snapshots.insert then
+          then
+        then snapshots.record.size @ snapshots.cursor +!
+      repeat
+    then
+  again ;
+
+\ Read a saved description, returning an empty string when none was supplied.
+: snapshots.comment ( -- address length )
+  s" /comment" snapshot.filename
+  snapshot.file 524288 0 0 0 0 syscall.open syscall6 dup 0 < if drop snapshot.wrapper 0 ; then
+  snapshot.fd ! snapshot.fd @ snapshot.wrapper page.size 1- 0 0 0 0 syscall6
+  dup 0 >= snapshot.need snapshot.close snapshot.wrapper swap ;
+
+\ Print a single-line description with control characters rendered harmlessly.
+: snapshots.text ( address length -- )
+  begin dup while
+    >r dup c@ dup 32 127 within 0= if drop 63 then emit 1+ r> 1-
+  repeat 2drop ;
+
+\ Select a row and keep it in the visible portion of the list.
+: snapshots.select ( index -- )
+  dup 0 < if drop 0 then snapshots.count @ 1- min snapshots.selected !
+  snapshots.selected @ snapshots.first @ < if snapshots.selected @ snapshots.first ! then
+  snapshots.selected @ snapshots.first @ snapshots.rows @ + >= if
+    snapshots.selected @ snapshots.rows @ - 1+ snapshots.first !
+  then ;
+
+\ Display one revision ID and its saved description using the current output vector.
+: snapshots.row ( index -- )
+  cells snapshots.list @ + @ snapshot.node
+  snapshot.work snapshot.work.length @ + 8 - 8 type s"   " type
+  snapshots.comment dup if
+    tui.active @ if tui.width @ 13 - dup 0 < if drop 0 then min then snapshots.text
+  else 2drop s" (no comment)" type then cr ;
+
+\ Draw a bounded snapshot viewport with the selected revision highlighted.
+: snapshots.render
+  tui.measure tui.size @ 65535 and dup 0= if drop 24 then
+  6 - dup 1 < if drop 1 then snapshots.rows ! snapshots.selected @ snapshots.select
+  tui.normal clear s" Snapshot " type snapshots.selected @ 1+ u. 47 emit snapshots.count @ u. cr
+  s" Snapshots" tui.panel 1 tui.clip ! snapshots.first @ snapshots.index !
+  begin snapshots.index @ snapshots.count @ < snapshots.index @ snapshots.first @ snapshots.rows @ + < and while
+    tui.row.begin snapshots.index @ snapshots.selected @ = if tui.selected s" > " else s"   " then type
+    snapshots.index @ snapshots.row 1 snapshots.index +!
+  repeat tui.panel.end
+  s" Up/Down: select  Enter: restore  Esc/q: return" tui.width @ min type ;
+
+\ Navigate revisions, returning true only when Enter requests restoration.
+: snapshots.navigate ( -- restore? )
+  snapshots.render
+  begin
+    debug.key dup 10 = over 13 = or if drop -1 ; then
+    dup 113 = over 4 = or over -2 = or if drop 0 ; then
+    27 = if
+      debug.key dup -1 = if drop 0 ; then
+      dup 91 = swap 79 = or if
+        debug.key dup 65 = if snapshots.selected @ 1- snapshots.select then
+        66 = if snapshots.selected @ 1+ snapshots.select then snapshots.render
+      then
+    then
+  again ;
+
+\ Browse project snapshots; Enter verifies and restores the selected revision.
+\ Redirected output lists all revisions without consuming command input.
+: snapshots
+  snapshots.scan
+  snapshots.count @ 0= if snapshots.release s" No snapshots in this project." type cr ; then
+  tui.measure tui.terminal @ if debug.terminal.open else 0 then if
+    0 snapshots.selected ! 0 snapshots.first ! snapshots.navigate >r
+    snapshots.selected @ cells snapshots.list @ + @ snapshot.node
+    snapshot.work snapshot.saved snapshot.work.length @ 1+ move
+    tui.normal clear debug.terminal.close snapshots.release
+    r> if snapshot.saved dup string.length snapshot.restore then
+  else
+    0 snapshots.index ! begin snapshots.index @ snapshots.count @ < while
+      snapshots.index @ snapshots.row 1 snapshots.index +!
+    repeat snapshots.release
+  then ;
 
 \ Source file buffer owned by a native replacement build.
 variable build.source.buffer
@@ -6365,7 +6561,7 @@ variable build.candidate
 \ Display the selected checkpoint path for filesystem browsing or later restoration.
 : checkpoint.path
   snapshot.length @ if snapshot.current snapshot.length @ type cr else
-    s" No checkpoint yet; the first definition creates a root and child." type cr
+    s" No snapshot saved; use snapshot followed by a description." type cr
   then ;
 
 \ Run a counted shell command through libc and return its encoded wait status.
@@ -6420,7 +6616,7 @@ unit.end
   depth source.load.depth !
   source.load.buffer @ source.load.length @ editor.stage @ image.build
   depth source.load.depth @ = require
-  editor.stage @ image.seal editor.stage @ snapshot.publish
+  editor.stage @ image.seal
   editor.stage @ editor.image ! 0 editor.stage ! 0 compiler.failure ! source.load.release ;
 
 \ Load and compile the following pathname, consuming the rest of the input line.
@@ -6541,7 +6737,7 @@ $" prune.append
 unit.end
 " prune.append 1 prune.count +! ;
 
-\ Prune superseded unreferenced editor entries and checkpoint the new dictionary.
+\ Prune superseded unreferenced editor entries in the running dictionary.
 \ This removes lookup records, not executable bytes, source history or old images.
 : prune
   editor.stage @ 0= require
@@ -6561,7 +6757,7 @@ unit.end
   prune.count @ if
     image.new editor.stage !
     prune.source @ prune.length @ editor.stage @ image.build
-    editor.stage @ image.seal editor.stage @ snapshot.publish
+    editor.stage @ image.seal
     editor.stage @ editor.image ! 0 editor.stage !
   then
   prune.source @ image.free 0 prune.source !
@@ -6580,10 +6776,10 @@ unit.end
   s" recovery.resume" compiler.xt org + context recovery.continuation.field + !
   recovery.enter dup if
     process.signal.exit + input.status !
-    stacks.reset tui.reset debug.terminal.close history.draft.free fault. debug.dispatch editor.cancel source.load.release snapshot.release stacks.reset ;
+    stacks.reset tui.reset debug.terminal.close history.draft.free fault. debug.dispatch editor.cancel source.load.release snapshot.release snapshot.comment.release snapshots.release stacks.reset ;
   then drop
-  context input.error.field + @ dup if input.status ! tui.reset debug.terminal.close editor.cancel source.load.release snapshot.release ; then drop
-  context quit.request.field + @ if tui.reset debug.terminal.close editor.cancel source.load.release snapshot.release then
+  context input.error.field + @ dup if input.status ! tui.reset debug.terminal.close editor.cancel source.load.release snapshot.release snapshot.comment.release snapshots.release ; then drop
+  context quit.request.field + @ if tui.reset debug.terminal.close editor.cancel source.load.release snapshot.release snapshot.comment.release snapshots.release then
   input.eof @ 0= input.length @ 0<> or if 0 input.status ! then ;
 
 \ Read fresh commands until EOF, retaining normal stack state between lines.
@@ -6667,5 +6863,5 @@ code.end
 \ Initialize protected execution and process startup input or enter the main loop.
 : main
   test.layout stacks.protect signals.install snapshot.boot
-  s" snapshot.publish" compiler.xt editor.checkpoint ! command.run ;
+  command.run ;
 unit.end

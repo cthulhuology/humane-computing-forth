@@ -68,6 +68,7 @@ test-tty: forth
 	ruby selfhost/check-pager-tty.rb ./forth
 	ruby selfhost/check-words-tty.rb ./forth
 	ruby selfhost/check-checkpoints-tty.rb ./forth
+	ruby selfhost/check-snapshots-tty.rb ./forth
 
 clean:
 	rm -f forth selfhost/build/forth selfhost/build/image.bin selfhost/build/code.bin selfhost/build/dictionary.bin selfhost/build/source.bin

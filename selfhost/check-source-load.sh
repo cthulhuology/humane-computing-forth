@@ -21,14 +21,14 @@ variable imported.cell
 \ Add a compile-time constant from the file's interpreting reader.
 123 constant imported.constant
 FORTH
-output=$(printf '88\nsource.load %s\n. imported . doubled . imported.constant . imported.cell @ . verify? . depth . cr\nsource.save %s\ncheckpoints\nbye\n' "$work/import file.f" "$work/export.f" | "$runtime")
+output=$(printf '88\nsource.load %s\n. imported . doubled . imported.constant . imported.cell @ . verify? . depth . cr\nsnapshot Imported source\nsource.save %s\ncheckpoints\nbye\n' "$work/import file.f" "$work/export.f" | "$runtime")
 case "$output" in *'88 41 82 123 0 -1 0 '*) ;; *) printf '%s\n' "$output"; exit 1;; esac
 last=$(printf '%s\n' "$output" | tail -n 1)
 ruby "$project/selfhost/reconstruct-snapshot.rb" "$last" "$work/restored.bin" "$work/restored.f"
 cmp "$work/export.f" "$work/restored.f"
 "$runtime" snapshot.verify "$last" </dev/null
-# A whole file is one child, not a publication for every definition.
-test "$(find "$work/$(basename "$work").snapshots" -name complete | wc -l)" -eq 2
+# One explicit save creates exactly one revision after the entire import.
+test "$(find "$work/$(basename "$work").snapshots" -name complete | wc -l)" -eq 1
 grep -q 'Imported words retain their documentation' "$work/export.f"
 cat > "$work/broken.f" <<'FORTH'
 : unpublished 99 ;
@@ -40,11 +40,11 @@ case "$output" in *'Compilation error: missing.import.word'*'Unknown command wor
 printf ': unbalanced 1 ;\n123 constant misplaced\n' > "$work/unbalanced.f"
 output=$(printf '88\nsource.load %s\nunbalanced\nsource.load.buffer @ . editor.stage @ . 43 . cr\nbye\n' "$work/unbalanced.f" | "$runtime")
 case "$output" in *'Compilation error:'*'Unknown command word: unbalanced'*'0 0 43 '*) ;; *) printf '%s\n' "$output"; exit 1;; esac
-# A failed checkpoint write after successful compilation must also release the import.
+# Source import does not depend on a writable snapshot destination.
 mkdir "$work/failure"
 printf blocked > "$work/failure/failure.snapshots"
-output=$(cd "$work/failure"; printf 'source.load %s\nimported\nsource.load.buffer @ . editor.stage @ . 44 . cr\nbye\n' "$work/import file.f" | HOME="$work/failure" "$runtime")
-case "$output" in *'Checkpoint I/O failed:'*'Unknown command word: imported'*'0 0 44 '*) ;; *) printf '%s\n' "$output"; exit 1;; esac
+output=$(cd "$work/failure"; printf 'source.load %s\nimported . cr\nsource.load.buffer @ . editor.stage @ . 44 . cr\nbye\n' "$work/import file.f" | HOME="$work/failure" "$runtime")
+case "$output" in *'41 '*'0 0 44 '*) ;; *) printf '%s\n' "$output"; exit 1;; esac
 # The counted reader is callable from ordinary Forth definitions too.
 output=$("$runtime" ": import.test s\" $work/import file.f\" source.read ; import.test imported . verify? . depth ." </dev/null)
 case "$output" in *'41 -1 0 '*) ;; *) printf '%s\n' "$output"; exit 1;; esac

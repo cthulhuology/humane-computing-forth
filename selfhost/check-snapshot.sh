@@ -9,8 +9,21 @@ trap 'rm -rf "$work"' EXIT
 export HOME="$work/home with spaces"
 mkdir -p "$HOME" "$work/project with spaces"
 cd "$work/project with spaces"
+# Editing, importing and pruning must never create snapshots on their own.
+mkdir "$work/unsaved"
+printf ': loaded 7 ;\nunit.end\n' > "$work/import.f"
+output=$(cd "$work/unsaved"; printf ': draft 1 ;\n: draft 2 ;\nsource.load %s\nprune\ndraft . loaded . verify? . cr\nbye\n' "$work/import.f" | "$runtime")
+case "$output" in *'1 superseded dictionary entries pruned.'*'2 7 -1 '*) ;; *) printf '%s\n' "$output"; exit 1;; esac
+test ! -e "$work/unsaved/unsaved.snapshots"
+# The first explicit save contains all current edits and creates only one root.
+output=$(cd "$work/unsaved"; printf ': draft 9 ;\nsource.load %s\nsnapshot All edits\n: later 10 ;\nbye\n' "$work/import.f" | "$runtime")
+test "$(find "$work/unsaved" -name complete | wc -l)" -eq 1
+test "$(cat "$work/unsaved/unsaved.snapshots/00000000/comment")" = 'All edits'
+output=$(printf 'restore %s\ndraft . loaded . cr\nlater\nbye\n' "$work/unsaved/unsaved.snapshots/00000000" | "$runtime")
+case "$output" in *'9 7 '*'Unknown command word: later'*) ;; *) printf '%s\n' "$output"; exit 1;; esac
+
 collection="$PWD/project with spaces.snapshots"
-output=$(printf 'variable counter\n99 counter !\n: value 11 ;\n: value 22 ;\nundo\ncounter @ . value . fdepth . depth . cr\n: value 33 ;\nvalue . verify? . cr\nsource.save %s\ncheckpoints\nbye\n' "$work/export.f" | "$runtime")
+output=$(printf 'snapshot\nvariable counter\nsnapshot\n99 counter !\n: value 11 ;\nsnapshot\n: value 22 ;\nsnapshot\nundo\ncounter @ . value . fdepth . depth . cr\n: value 33 ;\nsnapshot\nvalue . verify? . cr\nsource.save %s\ncheckpoints\nbye\n' "$work/export.f" | "$runtime")
 case "$output" in *'0 11 0 0 '*'33 -1 '*) ;; *) printf '%s\n' "$output"; exit 1;; esac
 root="$collection/00000000"
 a="$collection/00000002"
@@ -35,9 +48,9 @@ cp "$b/image.patch" "$work/good.patch"
 ruby -e 'p=ARGV[0];s=File.binread(p);abort "fixture source absent" unless s.include?(": value 22 ;");File.binwrite(p,s.sub(": value 22 ;",": value 23 ;"))' "$b/image.patch"
 output=$(printf 'restore %s\n43 . cr\nbye\n' "$b" | "$runtime")
 case "$output" in *'Snapshot source verification failed:'*'43 '*) ;; *) printf '%s\n' "$output"; exit 1;; esac
-# A failed automatic commit leaves the old definition and releases its buffers.
-output=$(printf 'restore %s\n: verify? 0 ;\nverify? . snapshot.result @ . snapshot.patch @ . depth . cr\nbye\n' "$c" | "$runtime")
-case "$output" in *'Snapshot source verification failed:'*'-1 0 0 0 '*) ;; *) printf '%s\n' "$output"; exit 1;; esac
+# A failed explicit save retains unsaved definitions and releases its buffers.
+output=$(printf 'restore %s\n: verify? 0 ;\nsnapshot invalid verifier\nverify? . snapshot.result @ . snapshot.patch @ . depth . cr\nbye\n' "$c" | "$runtime")
+case "$output" in *'Snapshot source verification failed:'*'0 0 0 0 '*) ;; *) printf '%s\n' "$output"; exit 1;; esac
 # Structural corruption, forward parents, truncation and absent markers all fail safely.
 for damage in trailing parent offset length truncate marker; do
   cp "$work/good.patch" "$b/image.patch"
@@ -51,16 +64,16 @@ output=$(printf 'source.save %s\n45 . cr\nbye\n' "$work/export.f" | "$runtime")
 case "$output" in *'Checkpoint I/O failed:'*'45 '*) ;; *) printf '%s\n' "$output"; exit 1;; esac
 # Saving follows chdir and names each collection after the new working directory.
 mkdir "$work/other project"
-output=$(printf 'restore %s\n: switch s" %s/other project" chdir drop ;\nswitch\n: elsewhere 51 ;\ncheckpoint.path\nvalue . elsewhere . cr\nbye\n' "$c" "$work" | "$runtime")
-case "$output" in *"$work/other project/other project.snapshots/00000001"*'33 51 '*) ;; *) printf '%s\n' "$output"; exit 1;; esac
-# A failed automatic save must not publish the definition.
+output=$(printf 'restore %s\n: switch s" %s/other project" chdir drop ;\nswitch\n: elsewhere 51 ;\nsnapshot New project\ncheckpoint.path\nvalue . elsewhere . cr\nbye\n' "$c" "$work" | "$runtime")
+case "$output" in *"$work/other project/other project.snapshots/00000000"*'33 51 '*) ;; *) printf '%s\n' "$output"; exit 1;; esac
+# Definitions remain usable even when the snapshot destination cannot be written.
 mkdir "$work/failure"
 printf blocked > "$work/failure/failure.snapshots"
-output=$(cd "$work/failure"; printf ': unpublished 19 ;\n46 . cr\nunpublished\nbye\n' | "$runtime")
-case "$output" in *'Checkpoint I/O failed:'*'46 '*'Unknown command word: unpublished'*) ;; *) printf '%s\n' "$output"; exit 1;; esac
+output=$(cd "$work/failure"; printf ': unpublished 19 ;\n46 . cr\nunpublished . cr\nbye\n' | "$runtime")
+case "$output" in *'46 '*'19 '*) ;; *) printf '%s\n' "$output"; exit 1;; esac
 # Pruning retains references and replays its decisions through patch reconstruction.
 mkdir "$work/prune"
-output=$(cd "$work/prune"; printf ': unused 11 ;\n: unused 22 ;\nprune\n: used 31 ;\n: caller used ;\n: used 32 ;\nprune\nunused . caller . used . verify? . cr\nsource.save %s\ncheckpoints\nbye\n' "$work/pruned.f" | "$runtime")
+output=$(cd "$work/prune"; printf ': unused 11 ;\n: unused 22 ;\nprune\n: used 31 ;\n: caller used ;\n: used 32 ;\nprune\nunused . caller . used . verify? . cr\nsource.save %s\nsnapshot Pruned system\ncheckpoints\nbye\n' "$work/pruned.f" | "$runtime")
 case "$output" in *'1 superseded dictionary entries pruned.'*'0 superseded dictionary entries pruned.'*'22 31 32 -1 '*) ;; *) printf '%s\n' "$output"; exit 1;; esac
 grep -q ' entry.hide$' "$work/pruned.f"
 last=$(printf '%s\n' "$output" | tail -n 1)
@@ -73,7 +86,7 @@ case "$output" in *'0 superseded dictionary entries pruned.'*'17 18 -1 '*) ;; *)
 # Unchanged revisions store no spans; growth and shrink reproduce exact images.
 mkdir "$work/extents"
 ruby -e 'File.write(ARGV[0], 92.chr + " retained source padding " + "x" * 8192 + "\n")' "$work/padding.f"
-output=$(cd "$work/extents"; printf 'checkpoint\norg\nsource.load %s\nsnapshot.publish\ncheckpoint.path\nbye\n' "$work/padding.f" | "$runtime")
+output=$(cd "$work/extents"; printf 'checkpoint\ncheckpoint\norg\nsource.load %s\nsnapshot Grown source\nsnapshot.publish\ncheckpoint.path\nbye\n' "$work/padding.f" | "$runtime")
 base="$work/extents/extents.snapshots"
 test "$(wc -c < "$base/00000001/image.patch")" -eq 40
 ruby "$decoder" "$base/00000000" "$work/base.bin"
@@ -85,6 +98,16 @@ cmp "$work/base.bin" "$work/shrunk.bin"
 # Copying a complete project collection preserves its parent references.
 cp -r "$base" "$work/moved.snapshots"
 "$runtime" snapshot.verify "$work/moved.snapshots/00000003" </dev/null
+
+# Explicit descriptions consume the rest of the line and are committed with the patch.
+mkdir "$work/descriptions"
+output=$(cd "$work/descriptions"; printf '42\nsnapshot release one ; bye\n. cr\nsnapshot release two\nsnapshots\nbye\n' | "$runtime")
+case "$output" in *'42 '*'00000001  release two'*'00000000  release one ; bye'*) ;; *) printf '%s\n' "$output"; exit 1;; esac
+test "$(cat "$work/descriptions/descriptions.snapshots/00000000/comment")" = 'release one ; bye'
+"$runtime" snapshot.verify "$work/descriptions/descriptions.snapshots/00000000" </dev/null
+# A failed save releases the captured comment and keeps the input loop usable.
+output=$(cd "$work/failure"; printf 'snapshot cannot save\nsnapshot.comment.address @ . snapshot.comment.length @ . 47 . cr\nbye\n' | "$runtime")
+case "$output" in *'Checkpoint I/O failed:'*'0 0 47 '*) ;; *) printf '%s\n' "$output"; exit 1;; esac
 
 if [ "${VALIDATE_SF:-0}" = 1 ]; then
   mkdir -p "$work/seed/selfhost/build"

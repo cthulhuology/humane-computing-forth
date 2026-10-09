@@ -21,7 +21,7 @@ Dir.mktmpdir do |home|
       _, status = Timeout.timeout(15) { Process.wait2(pid) }
       raise "Checkpoint listing failed: #{output.inspect}" unless status.success?
       raise 'Checkpoint listing entered a TUI' if output.include?("\e")
-      expected = index.zero? ? 'No checkpoint yet' : File.join(home, File.basename(home) + ".snapshots/")
+      expected = 'No snapshot saved'
       raise "Missing checkpoint information: #{output.inspect}" unless output.include?(expected)
       raise 'Terminal settings changed' unless original == IO.popen(['stty', '-g'], in: slave, &:read)
     ensure
