@@ -1,31 +1,86 @@
+\ Linux page size in bytes used to align mappings and protection boundaries.
 4096 constant page.size
+
+\ Signature identifying the canonical native Forth image format.
 $31464c4553465446 constant image.magic
-2 constant image.version
+
+\ Version of the canonical image and dictionary layout.
+3 constant image.version
+
+\ Header byte offset storing the image signature.
 0 constant header.magic
+
+\ Header byte offset storing the image-format version.
 8 constant header.version
+
+\ Header byte offset storing the page-rounded used image size.
 16 constant header.image.size
+
+\ Header byte offset storing the exclusive occupied-code boundary.
 24 constant header.code.limit
+
+\ Header byte offset storing the exclusive used dictionary boundary.
 32 constant header.dictionary.limit
+
+\ Header byte offset storing the newest dictionary entry offset.
 40 constant header.dictionary.root
+
+\ Header byte offset storing the mapped source start offset.
 48 constant header.source.offset
+
+\ Header byte offset storing the exact retained source byte count.
 56 constant header.source.length
+
+\ Header byte offset storing the image-relative main entry point.
 64 constant header.main.xt
+
+\ Header byte offset storing the exclusive private-variable allocation boundary.
 72 constant header.context.limit
+
+\ Header byte offset storing the image-relative process startup entry point.
 80 constant header.start.xt
+
+\ Header byte offset storing the image-relative native recompiler entry point.
 96 constant header.rebuild.xt
+
+\ Image-relative offset of the first executable code byte.
 4096 constant code.start
-131072 constant dictionary.start
-262144 constant source.start
+
+\ Image-relative offset of the first dictionary record.
+262144 constant dictionary.start
+
+\ Image-relative offset of the retained source text.
+393216 constant source.start
+
 \ Dictionary field offsets are bytes, independent of host cell numbering.
+
+\ Dictionary field byte offset storing the preceding dictionary record offset.
 0 constant entry.previous
+
+\ Dictionary field byte offset storing the image-relative executable entry point.
 8 constant entry.xt
+
+\ Dictionary field byte offset storing the source-backed name length.
 16 constant entry.name.length
+
+\ Dictionary field byte offset storing the defining source token offset.
 24 constant entry.source.start
+
+\ Dictionary field byte offset storing the definition kind.
 32 constant entry.kind
+
+\ Dictionary field byte offset storing the constant value or variable context offset.
 40 constant entry.value
+
+\ Dictionary field byte offset storing the image-relative name text offset.
 48 constant entry.name.offset
+
+\ Dictionary field byte offset storing the immediate/compiler flags.
 56 constant entry.flags
+
+\ Dictionary flag selecting execution during source compilation.
 1 constant flag.immediate
+
 \ Development-only file contract tests, also written in Forth.
 \ Runtime self-compilation and A/B/C comparisons are implemented in forth.f.
 variable image.file

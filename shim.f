@@ -42,9 +42,15 @@ variable string.start
   r> close-file throw ;
 
 \ Select private host bindings while evaluating shared target source sections.
+
+\ Private SwiftForth wordlist for the shared native assembler bindings.
 wordlist constant assembler.words
+
 get-order assembler.words swap 1+ set-order
 assembler.words set-current
+
+\ Add numeric displacements while evaluating native CODE operands.
+: + + ;
 
 \ Translate a shared assembler check failure into a host-catchable exception.
 : require 0= if -4100 throw then ;
@@ -79,7 +85,6 @@ variable section.end.length
 source.read
 s" HOST-LAYOUT-BEGIN" s" HOST-LAYOUT-END" section.evaluate
 s" HOST-ASSEMBLER-BEGIN" s" HOST-ASSEMBLER-END" section.evaluate
-
 
 variable test.buffer
 variable test.output
@@ -192,6 +197,8 @@ variable test.output
 
 \ Host execution bindings for the bootstrap vocabulary. These are SwiftForth
 \ dictionary entries, not a string dispatch chain. No host XT enters the image.
+
+\ Private SwiftForth wordlist for bootstrap compiler actions.
 wordlist constant seed.words
 
 \ Create a host dictionary binding for a bootstrap word's action and flags.
@@ -240,6 +247,17 @@ wordlist constant seed.words
 \ Mark the newest target dictionary entry for compile-time execution.
 : action.immediate root @ dst entry.flags + dup @ flag.immediate or swap ! ;
 
+\ Replay a recorded dictionary unlink while preserving all code and source bytes.
+: action.hide ( offset -- )
+  dup dictionary.start >= over dictionary.here @ < and insist
+  dup dictionary.start - /entry mod 0= insist
+  dup dst dup entry.name.offset + @ dst swap entry.name.length + @
+  target.find over <> insist
+  >r root begin dup @ while
+    dup @ r@ = if r@ dst entry.previous + @ swap ! r> drop exit then
+    @ dst entry.previous +
+  repeat drop r> drop bad ;
+
 \ Emit a native return without ending the target source region.
 : action.return asm.ret ;
 
@@ -270,6 +288,7 @@ wordlist constant seed.words
 ' action.constant flag.immediate seed: constant
 ' action.variable flag.immediate seed: variable
 ' action.immediate flag.immediate seed: immediate
+' action.hide flag.immediate seed: entry.hide
 ' action.return flag.immediate seed: ;
 ' action.if flag.immediate seed: if
 ' action.else flag.immediate seed: else
@@ -317,9 +336,80 @@ wordlist constant seed.words
 : save ( addr len name len -- ) w/o bin create-file throw >r
   r@ write-file throw r> close-file throw ;
 
-\ ELF packaging is a host OS adapter; it does not alter the canonical image.
-\ Separate R, RX and R load segments preserve the image's page protections.
-create elf.header page.size allot
+\ ELF packaging is the host OS adapter; canonical image bytes are never relocated.
+\ The system loader resolves services in a separate RELRO page before kernel entry.
+
+\ Number of wrapper pages preceding the canonical image.
+3       constant elf.pages
+
+\ File and virtual offset of the canonical image.
+12288   constant elf.image
+
+\ Offset of the wrapper's executable startup page.
+4096    constant elf.code
+
+\ Offset of the writable-then-read-only service table page.
+8192    constant elf.imports
+
+\ Offset of the wrapper's dynamic-link records.
+8320    constant elf.dynamic
+
+\ Number of 16-byte dynamic-link records, including the terminating null record.
+14      constant elf.dynamic.count
+
+\ Number of ELF program-header records.
+11      constant elf.program.count
+
+\ Offset of the NUL-terminated Linux interpreter path.
+1024    constant elf.interpreter
+
+\ Offset of the imported symbol table, including its null entry.
+1280    constant elf.symbols
+
+\ Offset of the dynamic string table.
+1536    constant elf.strings
+
+\ Offset of the explicit-addend import relocation table.
+1792    constant elf.relocations
+
+\ Offset of the SysV symbol hash table.
+2048    constant elf.hash
+
+\ Number of imported functions in loader table order.
+6       constant elf.import.count
+
+\ Offset of the libc main trampoline within the ELF wrapper.
+4352    constant elf.main
+
+\ Size of one ELF64 program-header record.
+56      constant elf.program.size
+
+\ Size of one ELF64 symbol or explicit-addend relocation record.
+24      constant elf.record.size
+
+\ Size of the ELF64 file header preceding the program-header table.
+64      constant elf.header.size
+
+\ Host buffer containing ELF headers, startup code and loader service slots.
+create elf.header elf.pages page.size * allot
+
+\ Current byte length of the ELF dynamic string table.
+variable elf.string.length
+
+\ Next import symbol number, excluding the null symbol.
+variable elf.symbol.index
+
+\ Current byte offset in the ELF dynamic table.
+variable elf.dynamic.cursor
+
+\ Dynamic string-table offset of the libc dependency name.
+variable elf.libc.name
+
+\ Dynamic string-table offset of the libdl dependency name.
+variable elf.libdl.name
+
+\ Dedicated assembler vector for the OS startup adapter.
+create elf.assembler 3 cells allot
 
 \ Round an ELF segment boundary up to the image page size.
 : page.align page.size 1- + page.size negate and ;
@@ -327,29 +417,108 @@ create elf.header page.size allot
 \ Store a cell in the ELF wrapper header.
 : elf! elf.header + ! ;
 
-\ Store a four-byte little-endian entry.field in the ELF wrapper header.
+\ Store a four-byte little-endian field in the ELF wrapper header.
 : elf32! elf.header + u32! ;
 
-\ Describe one ELF load segment with its permissions, offset, and length.
-: elf.segment ( flags offset length index -- )
-  56 * 64 + >r
-  1 r@ elf32! dup r@ 32 + elf! dup r@ 40 + elf! drop
+\ Describe a program segment with type, flags, offset, size and alignment.
+: elf.segment ( type flags offset length alignment index -- )
+  elf.program.size * elf.header.size + >r
+  r@ 48 + elf!
+  dup r@ 32 + elf! r@ 40 + elf!
   dup r@ 8 + elf! dup r@ 16 + elf! r@ 24 + elf!
-  r@ 4 + elf32! page.size r> 48 + elf! ;
+  r@ 4 + elf32! r> elf32! ;
 
-\ Write a Linux executable wrapper with separate read-only and executable segments.
+\ Append a NUL-terminated dynamic string and return its table-relative offset.
+: elf.string ( address length -- offset )
+  elf.string.length @ >r
+  2dup elf.header elf.strings + r@ + swap move
+  nip 1+ elf.string.length +!
+  elf.strings elf.string.length @ + elf.relocations <= insist r> ;
+
+\ Append one undefined function symbol and its R_X86_64_GLOB_DAT relocation.
+: elf.import ( address length -- )
+  elf.string
+  elf.symbol.index @ elf.record.size * elf.symbols + >r
+  r@ elf32! $12 elf.header r> + 4 + c!
+  elf.symbol.index @ 1- elf.record.size * elf.relocations + >r
+  elf.imports elf.symbol.index @ 1- cells + r@ elf!
+  elf.symbol.index @ 32 lshift 6 or r> 8 + elf!
+  1 elf.symbol.index +! ;
+
+\ Append one tag/value pair to the bounded ELF dynamic table.
+: elf.tag ( tag value -- )
+  elf.dynamic.cursor @ >r r@ 8 + elf! r> elf!
+  16 elf.dynamic.cursor +! ;
+
+\ Describe libc/libdl dependencies and eager external service relocations.
+: elf.link
+  1 elf.string.length ! 1 elf.symbol.index !
+  s" libc.so.6" elf.string elf.libc.name !
+  s" libdl.so.2" elf.string elf.libdl.name !
+  s" __libc_start_main" elf.import
+  s" dlopen" elf.import s" dlsym" elf.import s" dlclose" elf.import
+  s" dlerror" elf.import s" exit" elf.import
+  elf.symbol.index @ elf.import.count 1+ = insist
+  1 elf.hash elf32! elf.symbol.index @ elf.hash 4 + elf32!
+  elf.dynamic elf.dynamic.cursor !
+  1 elf.libc.name @ elf.tag 1 elf.libdl.name @ elf.tag
+  4 elf.hash elf.tag 5 elf.strings elf.tag 6 elf.symbols elf.tag
+  7 elf.relocations elf.tag 8 elf.import.count elf.record.size * elf.tag
+  9 elf.record.size elf.tag 10 elf.string.length @ elf.tag
+  11 elf.record.size elf.tag 21 0 elf.tag 30 8 elf.tag
+  $6ffffffb $08000001 elf.tag 0 0 elf.tag
+  elf.dynamic.cursor @ elf.dynamic - elf.dynamic.count 16 * = insist ;
+
+\ Emit ABI-correct libc initialization and a trampoline to the unchanged image.
+\ The trampoline restores Linux argc/argv layout and passes imports in R15.
+: elf.startup
+  asm.ctx @ >r elf.assembler >asm
+  elf.header elf.image out.init elf.code code.here !
+  r9 rdx mov.rr,
+  rsi rsp 0 load,
+  rdx rsp 8 lea,
+  rsp -16 and#,
+  rax 0 mov64,
+  rax push,
+  rsp push,
+  rcx 0 mov64,
+  r8 0 mov64,
+  rdi elf.main rip.lea,
+  rax elf.imports loader.start + rip.lea,
+  rax rax 0 load,
+  rax execute,
+  ud2,
+  elf.main out.pad
+  rsp rsi -8 lea,
+  r15 elf.imports rip.lea,
+  rax elf.image header.start.xt dst @ + rip.lea,
+  rax jump.reg,
+  out.size elf.imports <= insist
+  r> >asm ;
+
+\ Write a PIE executable with a system interpreter, RELRO imports and W^X segments.
 : elf.build
-  elf.header page.size erase
+  elf.header elf.image erase
   $00010102464c457f 0 elf!
   $00000001003e0003 16 elf!
-  page.size header.start.xt dst @ + 24 elf! 64 32 elf!
-  $0000000300380040 52 elf!
-  4 0 page.size code.start + 0 elf.segment
-  5 page.size code.start + header.code.limit dst @ page.align code.start - 1 elf.segment
-  4 header.code.limit dst @ page.align page.size +
-  header.image.size dst @ header.code.limit dst @ page.align - 2 elf.segment
+  elf.code 24 elf! elf.header.size 32 elf!
+  elf.program.count 32 lshift $00380040 or 52 elf!
+  6 4 elf.header.size elf.program.count elf.program.size * 8 0 elf.segment
+  3 4 elf.interpreter 28 1 1 elf.segment
+  s" /lib64/ld-linux-x86-64.so.2" elf.header elf.interpreter + swap move
+  1 4 0 page.size page.size 2 elf.segment
+  1 5 elf.code page.size page.size 3 elf.segment
+  1 6 elf.imports page.size page.size 4 elf.segment
+  1 4 elf.image code.start page.size 5 elf.segment
+  1 5 elf.image code.start + header.code.limit dst @ page.align code.start - page.size 6 elf.segment
+  1 4 header.code.limit dst @ page.align elf.image +
+  header.image.size dst @ header.code.limit dst @ page.align - page.size 7 elf.segment
+  2 6 elf.dynamic elf.dynamic.count 16 * 8 8 elf.segment
+  $6474e551 6 0 0 16 9 elf.segment
+  $6474e552 4 elf.imports page.size 1 10 elf.segment
+  elf.link elf.startup
   s" selfhost/build/forth" w/o bin create-file throw >r
-  elf.header page.size r@ write-file throw
+  elf.header elf.image r@ write-file throw
   output @ header.image.size dst @ r@ write-file throw r> close-file throw ;
 
 \ Compile the initial image and save the executable and all split artifacts.

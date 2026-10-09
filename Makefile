@@ -27,6 +27,11 @@ test: forth
 	sh selfhost/check-debug.sh ./forth && \
 	sh selfhost/check-editor.sh ./forth
 	sh selfhost/check-history.sh ./forth
+	sh selfhost/check-inspection.sh ./forth
+	sh selfhost/check-tui.sh ./forth
+	sh selfhost/check-ffi.sh ./forth
+	sh selfhost/check-fp.sh ./forth
+	SF="$(SF)" sh selfhost/check-snapshot.sh ./forth
 	@work=$$(mktemp -d); trap 'rm -rf "$$work"' EXIT; \
 	cp selfhost/build/forth "$$work/forth"; \
 	cd "$$work"; env -i PATH=/nonexistent ./forth selftest && \
@@ -35,6 +40,10 @@ test: forth
 # Optional terminal interaction tests use Ruby standard-library PTY support.
 test-tty: forth
 	ruby selfhost/check-history-tty.rb ./forth
+	ruby selfhost/check-tui-tty.rb ./forth
+	ruby selfhost/check-where-tty.rb ./forth
+	ruby selfhost/check-pager-tty.rb ./forth
+	ruby selfhost/check-words-tty.rb ./forth
 
 clean:
 	rm -f forth selfhost/build/forth selfhost/build/image.bin selfhost/build/code.bin selfhost/build/dictionary.bin selfhost/build/source.bin
