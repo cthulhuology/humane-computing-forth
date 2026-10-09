@@ -22,7 +22,7 @@ $31464c4553465446 constant image.magic
 16 constant entry.name.length
 24 constant entry.source.start
 32 constant entry.kind
-40 constant entry.auxiliary
+40 constant entry.value
 48 constant entry.name.offset
 56 constant entry.flags
 1 constant flag.immediate

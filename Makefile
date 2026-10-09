@@ -1,6 +1,10 @@
 SF ?= sf
-.PHONY: all verify test check-docs clean
-all: selfhost/build/forth
+.PHONY: all verify test test-tty check-docs clean
+all: forth
+
+forth: selfhost/build/forth
+	@staged=$$(mktemp ./forth.XXXXXX); trap 'rm -f "$$staged"' EXIT; \
+	cp -p $< "$$staged" && mv -f "$$staged" $@
 
 # forth.f is canonical hand-maintained Forth source, never a generated file.
 selfhost/build/forth: forth.f shim.f | check-docs
@@ -11,15 +15,26 @@ selfhost/build/forth: forth.f shim.f | check-docs
 check-docs:
 	awk -f selfhost/check-docs.awk forth.f shim.f selfhost/check.f
 
-verify: selfhost/build/forth
-	./selfhost/build/forth
+verify: forth
+	./forth selftest
 
-test: selfhost/build/forth
-	./selfhost/build/forth
+test: forth
+	./forth selftest
 	$(SF) selfhost/check.f
 	@work=$$(mktemp -d); trap 'rm -rf "$$work"' EXIT; \
+	export HOME="$$work"; \
+	sh selfhost/check-cli.sh ./forth && \
+	sh selfhost/check-debug.sh ./forth && \
+	sh selfhost/check-editor.sh ./forth
+	sh selfhost/check-history.sh ./forth
+	@work=$$(mktemp -d); trap 'rm -rf "$$work"' EXIT; \
 	cp selfhost/build/forth "$$work/forth"; \
-	cd "$$work"; env -i PATH=/nonexistent ./forth
+	cd "$$work"; env -i PATH=/nonexistent ./forth selftest && \
+	[ "$$(env -i PATH=/nonexistent ./forth 6 7 '*' .)" = '42 ' ]
+
+# Optional terminal interaction tests use Ruby standard-library PTY support.
+test-tty: forth
+	ruby selfhost/check-history-tty.rb ./forth
 
 clean:
-	rm -f selfhost/build/forth selfhost/build/image.bin selfhost/build/code.bin selfhost/build/dictionary.bin selfhost/build/source.bin
+	rm -f forth selfhost/build/forth selfhost/build/image.bin selfhost/build/code.bin selfhost/build/dictionary.bin selfhost/build/source.bin

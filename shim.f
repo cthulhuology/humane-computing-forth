@@ -186,6 +186,10 @@ variable test.output
     string.start @ source.start + asm.address
     pos @ string.start @ - asm.literal source.next exit
   then source.next repeat bad ;
+
+\ Compile a quoted string followed by the target output operation.
+: source.print, source.string, s" type" target.xt asm.call ;
+
 \ Host execution bindings for the bootstrap vocabulary. These are SwiftForth
 \ dictionary entries, not a string dispatch chain. No host XT enters the image.
 wordlist constant seed.words
@@ -276,6 +280,7 @@ wordlist constant seed.words
 ' action.if flag.immediate seed: while
 ' action.repeat flag.immediate seed: repeat
 ' source.string, flag.immediate seed: s"
+' source.print, flag.immediate seed: ."
 ' source.line.skip flag.immediate seed: \
 ' source.comment.skip flag.immediate seed: (
 ' c, 0 seed: c,
@@ -316,6 +321,9 @@ wordlist constant seed.words
 \ Separate R, RX and R load segments preserve the image's page protections.
 create elf.header page.size allot
 
+\ Round an ELF segment boundary up to the image page size.
+: page.align page.size 1- + page.size negate and ;
+
 \ Store a cell in the ELF wrapper header.
 : elf! elf.header + ! ;
 
@@ -337,8 +345,9 @@ create elf.header page.size allot
   page.size header.start.xt dst @ + 24 elf! 64 32 elf!
   $0000000300380040 52 elf!
   4 0 page.size code.start + 0 elf.segment
-  5 page.size code.start + dictionary.start code.start - 1 elf.segment
-  4 dictionary.start page.size + header.image.size dst @ dictionary.start - 2 elf.segment
+  5 page.size code.start + header.code.limit dst @ page.align code.start - 1 elf.segment
+  4 header.code.limit dst @ page.align page.size +
+  header.image.size dst @ header.code.limit dst @ page.align - 2 elf.segment
   s" selfhost/build/forth" w/o bin create-file throw >r
   elf.header page.size r@ write-file throw
   output @ header.image.size dst @ r@ write-file throw r> close-file throw ;
