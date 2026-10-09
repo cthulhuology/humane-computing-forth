@@ -5037,14 +5037,21 @@ variable words.search.first
     then
     entry.previous + @ words.cursor ! 1 words.index +!
   repeat tui.panel.end
-  s" Up/Down: select  Right: see  q: return  Enter: editor" tui.width @ min type cr
+  s" Up/Down: select  Enter/Right: see  q: return" tui.width @ min type cr
   words.missing @ if s" No matching words.  /: search  n: next" else s" /: search  n: next match" then tui.width @ min type ;
+
+\ Inspect the selected dictionary record while retaining the browser viewport.
+: words.inspect
+  editor.current debug.owner ! words.record @ pager.record ! pager.browse ;
 
 \ Browse entries and inspect the selected record without consuming command input.
 : words.navigate
   words.render
   begin
-    debug.key dup 113 = over 10 = or over 13 = or over 4 = or over -2 = or if drop ; then
+    debug.key dup 113 = over 4 = or over -2 = or if drop ; then
+    dup 10 = over 13 = or if
+      drop words.inspect pager.editor @ if ; then words.render
+    else
     dup 47 = if drop words.search.edit words.render else
     dup 110 = if drop words.selected @ 1+ words.search words.render else
     27 = if
@@ -5053,14 +5060,14 @@ variable words.search.first
         debug.key dup 65 = if words.selected @ 1- words.select then
         dup 66 = if words.selected @ 1+ words.select then
         67 = if
-          editor.current debug.owner ! words.record @ pager.record ! pager.browse
+          words.inspect
           pager.editor @ if ; then
         then words.render
       then
-    then then then
+    then then then then
   again ;
 
-\ List redirected dictionary output or browse a terminal with Right opening SEE.
+\ List redirected dictionary output or browse a terminal with Enter or Right opening SEE.
 \ Preserve terminal ownership and the dictionary viewport across nested inspection.
 : words
   tui.measure tui.terminal @ 0= if words.list ; then
@@ -5072,7 +5079,7 @@ variable words.search.first
   editor.current header.dictionary.root + @
   begin dup while editor.current + entry.previous + @ 1 words.count +! repeat drop
   words.count @ if words.navigate then
-  r> if debug.terminal.close then ;
+  tui.normal clear r> if debug.terminal.close then ;
 
 \ Return the number of double-precision values on the independent FP stack.
 : fdepth context float.sp.field + @ context float.stack.offset + - 8 / ;
@@ -5569,7 +5576,7 @@ variable snapshot.enabled
 \ Return the buffer used to construct a file pathname.
 : snapshot.file snapshot.buffers @ page.size 2 * + ;
 
-\ Return the retained on-disk ELF adapter buffer, never relocated memory.
+\ Return the buffer used to generate ELF metadata and native startup code.
 : snapshot.wrapper snapshot.buffers @ page.size 3 * + ;
 
 \ Allocate invocation-private path buffers and initialize descriptor state.
@@ -5667,22 +5674,193 @@ repeat
     else snapshot.ok ; then
   again ;
 
-\ Resolve a program-header field inside the copied ELF adapter.
-: snapshot.segment ( index field -- address ) swap 56 * 64 + + snapshot.wrapper + ;
+unit.end
 
-\ Copy the unrelocated executable adapter and update its image load extents.
-: snapshot.elf
-  s" /proc/self/exe" snapshot.file swap move 0 snapshot.file 14 + c!
-  snapshot.file 524288 0 0 0 0 syscall.open syscall6 dup 0 < if snapshot.fail then snapshot.fd !
-  snapshot.fd @ snapshot.wrapper snapshot.wrapper.size 0 0 0 0 syscall6
-  snapshot.wrapper.size = require snapshot.close
-  snapshot.wrapper @ $00010102464c457f = require
-  snapshot.image @ header.code.limit + @ page.align
-  dup code.start - dup 6 32 snapshot.segment ! 6 40 snapshot.segment !
-  dup snapshot.wrapper.size + dup 7 8 snapshot.segment !
-  dup 7 16 snapshot.segment ! 7 24 snapshot.segment !
-  snapshot.image @ header.image.size + @ swap -
-  dup 7 32 snapshot.segment ! 7 40 snapshot.segment ! ;
+\ Number of wrapper pages preceding the canonical image.
+3       constant elf.pages
+
+\ File and virtual offset of the canonical image.
+12288   constant elf.image
+
+\ Offset of the wrapper's executable startup page.
+4096    constant elf.code
+
+\ Offset of the writable-then-read-only service table page.
+8192    constant elf.imports
+
+\ Offset of the wrapper's dynamic-link records.
+8320    constant elf.dynamic
+
+\ Number of 16-byte dynamic-link records, including the terminating null record.
+14      constant elf.dynamic.count
+
+\ Number of ELF program-header records.
+11      constant elf.program.count
+
+\ Offset of the NUL-terminated Linux interpreter path.
+1024    constant elf.interpreter
+
+\ Offset of the imported symbol table, including its null entry.
+1280    constant elf.symbols
+
+\ Offset of the dynamic string table.
+1536    constant elf.strings
+
+\ Offset of the explicit-addend import relocation table.
+1792    constant elf.relocations
+
+\ Offset of the SysV symbol hash table.
+2048    constant elf.hash
+
+\ Number of imported functions in loader table order.
+6       constant elf.import.count
+
+\ Offset of the libc main trampoline within the ELF wrapper.
+4352    constant elf.main
+
+\ Size of one ELF64 program-header record.
+56      constant elf.program.size
+
+\ Size of one ELF64 symbol or explicit-addend relocation record.
+24      constant elf.record.size
+
+\ Size of the ELF64 file header preceding the program-header table.
+64      constant elf.header.size
+
+\ Return the native buffer for generated ELF headers, startup and import slots.
+: elf.header snapshot.wrapper ;
+
+\ Current byte length of the ELF dynamic string table.
+variable elf.string.length
+
+\ Next import symbol number, excluding the null symbol.
+variable elf.symbol.index
+
+\ Current byte offset in the ELF dynamic table.
+variable elf.dynamic.cursor
+
+\ Dynamic string-table offset of the libc dependency name.
+variable elf.libc.name
+
+\ Dynamic string-table offset of the libdl dependency name.
+variable elf.libdl.name
+
+\ Dedicated assembler vector for the OS startup adapter.
+variable elf.assembler
+
+\ Capacity cell of the dedicated three-cell assembler vector.
+variable elf.assembler.capacity
+
+\ Cursor cell of the dedicated three-cell assembler vector.
+variable elf.assembler.cursor
+
+\ Store a cell in the ELF wrapper header.
+: elf! elf.header + ! ;
+
+\ Store a four-byte little-endian field in the ELF wrapper header.
+: elf32! elf.header + u32! ;
+
+\ Describe a program segment with type, flags, offset, size and alignment.
+: elf.segment ( type flags offset length alignment index -- )
+  elf.program.size * elf.header.size + >r
+  r@ 48 + elf!
+  dup r@ 32 + elf! r@ 40 + elf!
+  dup r@ 8 + elf! dup r@ 16 + elf! r@ 24 + elf!
+  r@ 4 + elf32! r> elf32! ;
+
+\ Append a NUL-terminated dynamic string and return its table-relative offset.
+: elf.string ( address length -- offset )
+  elf.string.length @ >r
+  2dup elf.header elf.strings + r@ + swap move
+  nip 1+ elf.string.length +!
+  elf.strings elf.string.length @ + elf.relocations <= require r> ;
+
+\ Append one undefined function symbol and its R_X86_64_GLOB_DAT relocation.
+: elf.import ( address length -- )
+  elf.string
+  elf.symbol.index @ elf.record.size * elf.symbols + >r
+  r@ elf32! $12 elf.header r> + 4 + c!
+  elf.symbol.index @ 1- elf.record.size * elf.relocations + >r
+  elf.imports elf.symbol.index @ 1- cells + r@ elf!
+  elf.symbol.index @ 32 lshift 6 or r> 8 + elf!
+  1 elf.symbol.index +! ;
+
+\ Append one tag/value pair to the bounded ELF dynamic table.
+: elf.tag ( tag value -- )
+  elf.dynamic.cursor @ >r r@ 8 + elf! r> elf!
+  16 elf.dynamic.cursor +! ;
+
+\ Describe libc/libdl dependencies and eager external service relocations.
+: elf.link
+  1 elf.string.length ! 1 elf.symbol.index !
+  s" libc.so.6" elf.string elf.libc.name !
+  s" libdl.so.2" elf.string elf.libdl.name !
+  s" __libc_start_main" elf.import
+  s" dlopen" elf.import s" dlsym" elf.import s" dlclose" elf.import
+  s" dlerror" elf.import s" exit" elf.import
+  elf.symbol.index @ elf.import.count 1+ = require
+  1 elf.hash elf32! elf.symbol.index @ elf.hash 4 + elf32!
+  elf.dynamic elf.dynamic.cursor !
+  1 elf.libc.name @ elf.tag 1 elf.libdl.name @ elf.tag
+  4 elf.hash elf.tag 5 elf.strings elf.tag 6 elf.symbols elf.tag
+  7 elf.relocations elf.tag 8 elf.import.count elf.record.size * elf.tag
+  9 elf.record.size elf.tag 10 elf.string.length @ elf.tag
+  11 elf.record.size elf.tag 21 0 elf.tag 30 8 elf.tag
+  $6ffffffb $08000001 elf.tag 0 0 elf.tag
+  elf.dynamic.cursor @ elf.dynamic - elf.dynamic.count 16 * = require ;
+
+\ Emit ABI-correct libc initialization and a trampoline to the selected image.
+\ The trampoline restores Linux argc/argv layout and passes imports in R15.
+: elf.startup
+  asm.ctx @ >r elf.assembler >asm
+  elf.header elf.image out.init elf.code code.here !
+  r9 rdx mov.rr,
+  rsi rsp 0 load,
+  rdx rsp 8 lea,
+  rsp -16 and#,
+  rax 0 mov64,
+  rax push,
+  rsp push,
+  rcx 0 mov64,
+  r8 0 mov64,
+  rdi elf.main rip.lea,
+  rax elf.imports loader.start + rip.lea,
+  rax rax 0 load,
+  rax execute,
+  ud2,
+  elf.main out.pad
+  rsp rsi -8 lea,
+  r15 elf.imports rip.lea,
+  rax elf.image snapshot.image @ header.start.xt + @ + rip.lea,
+  rax jump.reg,
+  out.size elf.imports <= require
+  r> >asm ;
+
+\ Generate a PIE adapter with a system interpreter, RELRO imports and W^X segments.
+: elf.build
+  elf.header elf.image erase
+  $00010102464c457f 0 elf!
+  $00000001003e0003 16 elf!
+  elf.code 24 elf! elf.header.size 32 elf!
+  elf.program.count 32 lshift $00380040 or 52 elf!
+  6 4 elf.header.size elf.program.count elf.program.size * 8 0 elf.segment
+  3 4 elf.interpreter 28 1 1 elf.segment
+  s" /lib64/ld-linux-x86-64.so.2" elf.header elf.interpreter + swap move
+  1 4 0 page.size page.size 2 elf.segment
+  1 5 elf.code page.size page.size 3 elf.segment
+  1 6 elf.imports page.size page.size 4 elf.segment
+  1 4 elf.image code.start page.size 5 elf.segment
+  1 5 elf.image code.start + snapshot.image @ header.code.limit + @ page.align code.start - page.size 6 elf.segment
+  1 4 snapshot.image @ header.code.limit + @ page.align elf.image +
+  snapshot.image @ header.image.size + @ snapshot.image @ header.code.limit + @ page.align - page.size 7 elf.segment
+  2 6 elf.dynamic elf.dynamic.count 16 * 8 8 elf.segment
+  $6474e551 6 0 0 16 9 elf.segment
+  $6474e552 4 elf.imports page.size 1 10 elf.segment
+  elf.link elf.startup
+  ;
+
+\ Generate the entire ELF adapter from native source for the selected image.
+: snapshot.elf elf.build ;
 
 \ Persist exact image/source/delta files and a runnable executable, committing last.
 : snapshot.persist
@@ -5790,7 +5968,7 @@ repeat
   snapshot.init snapshot.path! s" /forth" snapshot.filename
   s" snapshot.validate" c.string snapshot.command !
   0 0 0 0 0 0 57 syscall6 dup 0 < if snapshot.fail then
-dup 0= if
+  dup 0= if
     drop 0 0 0 0 0 0 3 syscall6 drop
     -1 snapshot.exec drop 2 0 0 0 0 0 60 syscall6 drop ;
   then
@@ -5800,6 +5978,81 @@ dup 0= if
   snapshot.command @ c.string.free
   context context.scratch + 64 + @ 0<> if s" Checkpoint validation failed: " input.error then
   0 snapshot.exec snapshot.ok ;
+
+\ Source file buffer owned by a native replacement build.
+variable build.source.buffer
+
+\ Candidate canonical image owned by a native replacement build.
+variable build.candidate
+
+\ Execute a build worker in a fresh process and require a successful exit.
+\ The executable path is in snapshot.file; the counted text becomes argv[1].
+: build.run ( address length -- )
+  c.string snapshot.command !
+  0 0 0 0 0 0 57 syscall6 dup 0 < if snapshot.fail then
+  dup 0= if
+    drop 0 0 0 0 0 0 3 syscall6 drop
+    -1 snapshot.exec drop 2 0 0 0 0 0 60 syscall6 drop ;
+  then
+  >r begin r@ context context.scratch + 64 + 0 0 0 0 61 syscall6
+    dup syscall.interrupted <> until
+  r> = require snapshot.command @ c.string.free
+  context context.scratch + 64 + @ if
+    s" Native build worker failed; output was not published." type cr 2 process.exit
+  then ;
+
+\ Write the selected canonical image with a freshly generated ELF adapter.
+\ The caller supplies a new pathname in snapshot.file; existing files are refused.
+: build.executable
+  snapshot.elf 448 snapshot.create
+  snapshot.wrapper snapshot.wrapper.size snapshot.write
+  snapshot.image @ dup header.image.size + @ snapshot.write snapshot.finish ;
+
+\ Save all native build artifacts in the selected empty output directory.
+: build.artifacts
+  s" /image.bin" snapshot.filename 384 snapshot.create
+  snapshot.image @ dup header.image.size + @ snapshot.write snapshot.finish
+  s" /code.bin" snapshot.filename 384 snapshot.create
+  snapshot.image @ dictionary.start snapshot.write snapshot.finish
+  s" /dictionary.bin" snapshot.filename 384 snapshot.create
+  snapshot.image @ dictionary.start + source.start dictionary.start - snapshot.write snapshot.finish
+  s" /source.bin" snapshot.filename 384 snapshot.create
+  snapshot.image @ source.start + snapshot.image @ header.source.length + @ snapshot.write snapshot.finish
+  s" /forth" snapshot.filename build.executable snapshot.sync.directory ;
+
+\ Rebuild with the candidate compiler, generate its ELF and validate the result.
+\ Invoked in a fresh process so changed variable offsets never share the old context.
+: build.finish
+  snapshot.path.parse snapshot.path!
+  rebuild dup build.candidate ! snapshot.image ! build.artifacts
+  s" /forth" snapshot.filename s" selftest" build.run
+  build.candidate @ image.free 0 process.exit ;
+
+\ Compile a replacement source file into an empty output directory using native Forth.
+\ The first candidate runs a fresh compiler generation before final self-verification.
+: build.source ( source-address source-length directory-address directory-length -- )
+  snapshot.init snapshot.path!
+  dup 0 > over page.size 1- < and require
+  dup >r snapshot.file swap move 0 snapshot.file r> + c!
+  image.new build.source.buffer !
+  build.source.buffer @ image.capacity source.start - snapshot.read
+  build.source.buffer @ swap image.new dup build.candidate ! image.build
+  build.candidate @ snapshot.image !
+  s" /bootstrap" snapshot.filename build.executable
+  s" build.finish " snapshot.wrapper swap move
+  snapshot.work snapshot.wrapper 13 + snapshot.work.length @ move
+  snapshot.wrapper snapshot.work.length @ 13 + build.run
+  s" /bootstrap" snapshot.filename snapshot.file 0 0 0 0 0 87 syscall6 snapshot.ok
+  snapshot.sync.directory
+  build.candidate @ image.free build.source.buffer @ image.free
+  s" Native file rebuild and executable verification passed." type cr ;
+
+\ Rebuild the next source filename into the directory occupying the rest of the line.
+\ For a source pathname containing spaces, call the counted BUILD.SOURCE interface.
+: build.file
+  editor.stage @ 0= require
+  token.parse 0 > require token.address @ token.length @
+  snapshot.path.parse input.position @ input.resume ! build.source ;
 
 \ Restore the following checkpoint directory; the rest of the line is its path.
 : restore snapshot.path.parse snapshot.restore ;
@@ -5812,10 +6065,73 @@ dup 0= if
   repeat drop s" No parent checkpoint: " input.error ;
 
 \ Display the selected checkpoint path for filesystem browsing or later restoration.
-: checkpoints
+: checkpoint.path
   snapshot.length @ if snapshot.current snapshot.length @ type cr else
     s" No checkpoint yet; the first definition creates a root and child." type cr
   then ;
+
+\ Run a counted shell command through libc and return its encoded wait status.
+: system ( address length -- status )
+  c.string dup >r s" system" ffi.service c.call1 c.int r> c.string.free ;
+
+\ Change the process working directory; return zero on success or minus one.
+: chdir ( address length -- status )
+  c.string dup >r s" chdir" ffi.service c.call1 c.int r> c.string.free ;
+
+\ Create a directory with the supplied permission bits; return libc's status.
+: mkdir ( address length mode -- status )
+  >r c.string dup r> swap >r s" mkdir" ffi.service c.call2 c.int r> c.string.free ;
+
+\ Execute the remainder of the input line in the shell, preserving Forth stack depth.
+: $
+  source.space.skip parser.source @ parser.position @ +
+  parser.length @ parser.position @ -
+  parser.length @ dup parser.position ! input.position ! system drop ;
+
+\ Owned buffer for the combined source during a transactional file load.
+variable source.load.buffer
+
+\ Byte count of the existing source followed by the imported file.
+variable source.load.length
+
+\ Data-stack depth before compiling a source import; unbalanced input is rejected.
+variable source.load.depth
+
+\ Release an interrupted source import without changing the published dictionary.
+: source.load.release
+  source.load.buffer @ dup if image.free else drop then 0 source.load.buffer ! ;
+
+\ Compile a file after the complete current source and checkpoint it atomically.
+: source.read ( address length -- )
+  editor.stage @ 0= require snapshot.init
+  dup 0 > over page.size 1- < and require
+  dup >r snapshot.file swap move 0 snapshot.file r> + c!
+  source.load.release image.new source.load.buffer !
+  editor.current header.source.length + @ source.load.length !
+  editor.current source.start + source.load.buffer @ source.load.length @ move
+  10 source.load.buffer @ source.load.length @ + c! 1 source.load.length +!
+  source.load.buffer @ source.load.length @ +
+  image.capacity source.start - source.load.length @ - 16 - snapshot.read
+  source.load.length +!
+  s"
+
+unit.end
+" source.load.buffer @ source.load.length @ + swap move
+  10 source.load.length +!
+  image.new editor.stage ! s" editor.fail" compiler.xt compiler.failure !
+  depth source.load.depth !
+  source.load.buffer @ source.load.length @ editor.stage @ image.build
+  depth source.load.depth @ = require
+  editor.stage @ image.seal editor.stage @ snapshot.publish
+  editor.stage @ editor.image ! 0 editor.stage ! 0 compiler.failure ! source.load.release ;
+
+\ Load and compile the following pathname, consuming the rest of the input line.
+: source.load
+  snapshot.path.parse input.position @ input.resume ! source.read ;
+unit.end
+
+\ Display the current checkpoint path without entering an interactive browser.
+: checkpoints checkpoint.path ;
 
 \ Unlink a superseded record by offset, leaving code and allocation frontiers intact.
 \ Persisted offsets make pruning deterministic when the saved source is recompiled.
@@ -5966,10 +6282,10 @@ unit.end
   s" recovery.resume" compiler.xt org + context recovery.continuation.field + !
   recovery.enter dup if
     process.signal.exit + input.status !
-    stacks.reset tui.reset debug.terminal.close history.draft.free fault. debug.dispatch editor.cancel stacks.reset ;
+    stacks.reset tui.reset debug.terminal.close history.draft.free fault. debug.dispatch editor.cancel source.load.release stacks.reset ;
   then drop
-  context input.error.field + @ dup if input.status ! tui.reset editor.cancel ; then drop
-  context quit.request.field + @ if tui.reset editor.cancel then
+  context input.error.field + @ dup if input.status ! tui.reset debug.terminal.close editor.cancel source.load.release ; then drop
+  context quit.request.field + @ if tui.reset debug.terminal.close editor.cancel source.load.release then
   input.eof @ 0= input.length @ 0<> or if 0 input.status ! then ;
 
 \ Read fresh commands until EOF, retaining normal stack state between lines.
