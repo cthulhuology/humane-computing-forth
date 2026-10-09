@@ -5,6 +5,7 @@ runtime=$(realpath "${1:-./forth}")
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 export HOME="$work"
+cd "$work"
 cat > "$work/fp.f" <<'FORTH'
 fvariable saved.float
 2.5 fconstant two.half

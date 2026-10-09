@@ -1,7 +1,11 @@
 #!/bin/sh
 # Exercise native editor compilation and inspection without a host compiler.
 set -eu
-runtime=${1:-./forth}
+runtime=$(realpath "${1:-./forth}")
+work=$(mktemp -d)
+trap 'rm -rf "$work"' EXIT
+export HOME="$work"
+cd "$work"
 
 check_output() {
     expected=$1

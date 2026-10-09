@@ -1,10 +1,11 @@
 #!/bin/sh
 # Check explicit frames and output-vector cleanup without requiring a terminal.
 set -eu
-runtime=${1:-./forth}
+runtime=$(realpath "${1:-./forth}")
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 export HOME="$work"
+cd "$work"
 
 "$runtime" ': panel.example s" first line" s" Example" tui.frame ; panel.example depth . verify? .' > "$work/frame"
 awk '

@@ -20,7 +20,7 @@ def session(home)
   master, slave = PTY.open
   slave.winsize = [40, 120]
   original_terminal = IO.popen(['stty', '-g'], in: slave, &:read)
-  pid = Process.spawn({'HOME'=>home}, RUNTIME, in: slave, out: slave, err: slave)
+  pid = Process.spawn({'HOME'=>home}, RUNTIME, in: slave, out: slave, err: slave, chdir: home)
   yield master, pid, slave
   restored_terminal = IO.popen(['stty', '-g'], in: slave, &:read)
   raise 'terminal settings changed' unless original_terminal == restored_terminal

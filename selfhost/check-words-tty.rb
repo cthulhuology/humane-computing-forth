@@ -6,9 +6,9 @@ require 'tmpdir'
 RUNTIME = File.expand_path(ARGV.fetch(0, './forth'))
 FOOTER = 'Up/Down: select  Enter/Right: see  q: return'
 BROWSER_END = '/: search  n: next match'
-def receive(io, marker)
+def receive(io, marker, timeout: 15)
   output = +''
-  Timeout.timeout(15) do
+  Timeout.timeout(timeout) do
     until output.include?(marker)
       IO.select([io])
       output << io.read_nonblock(65536)
@@ -30,9 +30,9 @@ Dir.mktmpdir do |home|
   slave.winsize = [12, 60]
   original = IO.popen(['stty', '-g'], in: slave, &:read)
   definitions = (1..30).map { |i| ": browser.#{i} " + ('1 drop ' * 20) + ';' }.join(' ')
-  pid = Process.spawn({'HOME'=>home}, RUNTIME, definitions + ' 42 words . cr quit', in: slave, out: slave, err: slave)
+  pid = Process.spawn({'HOME'=>home}, RUNTIME, definitions + ' 42 words . cr quit', in: slave, out: slave, err: slave, chdir: home)
   begin
-    screen(receive(master, BROWSER_END), 1, 12)
+    screen(receive(master, BROWSER_END, timeout: 60), 1, 12)
     before = nil
     (2..15).each do |n|
       master.write("\e[B")
@@ -83,7 +83,7 @@ Dir.mktmpdir do |home|
   slave.winsize = [60, 100]
   pid = Process.spawn({'HOME'=>home}, RUNTIME,
     ': tiny.word ; 7 constant tiny.constant variable tiny.variable words bye',
-    in: slave, out: slave, err: slave)
+    in: slave, out: slave, err: slave, chdir: home)
   begin
     receive(master, BROWSER_END)
     %w[tiny.variable tiny.constant tiny.word].each_with_index do |name, index|

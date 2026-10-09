@@ -9,7 +9,7 @@ Dir.mktmpdir do |home|
     master, slave = PTY.open
     slave.winsize = [12, 60]
     original = IO.popen(['stty', '-g'], in: slave, &:read)
-    pid = Process.spawn({'HOME'=>home}, RUNTIME, command, in: slave, out: slave, err: slave)
+    pid = Process.spawn({'HOME'=>home}, RUNTIME, command, in: slave, out: slave, err: slave, chdir: home)
     begin
       output = +''
       Timeout.timeout(15) do
@@ -21,7 +21,7 @@ Dir.mktmpdir do |home|
       _, status = Timeout.timeout(15) { Process.wait2(pid) }
       raise "Checkpoint listing failed: #{output.inspect}" unless status.success?
       raise 'Checkpoint listing entered a TUI' if output.include?("\e")
-      expected = index.zero? ? 'No checkpoint yet' : File.join(home, '.forth.d/checkpoints/')
+      expected = index.zero? ? 'No checkpoint yet' : File.join(home, File.basename(home) + ".snapshots/")
       raise "Missing checkpoint information: #{output.inspect}" unless output.include?(expected)
       raise 'Terminal settings changed' unless original == IO.popen(['stty', '-g'], in: slave, &:read)
     ensure

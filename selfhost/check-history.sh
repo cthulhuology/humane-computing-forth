@@ -1,10 +1,11 @@
 #!/bin/sh
 # Check native history persistence using an isolated home directory.
 set -eu
-runtime=${1:-./forth}
+runtime=$(realpath "${1:-./forth}")
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 export HOME="$work"
+cd "$work"
 
 printf ': hello ." hello world" ;\nhello cr\nverify? . cr\nbye\n' > "$work/commands"
 output=$("$runtime" < "$work/commands")

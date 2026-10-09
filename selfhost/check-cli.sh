@@ -1,7 +1,11 @@
 #!/bin/sh
 # Exercise the native argument reader; no host Forth is used for these checks.
 set -eu
-runtime=${1:-./selfhost/build/forth}
+runtime=$(realpath "${1:-./selfhost/build/forth}")
+work=$(mktemp -d)
+trap 'rm -rf "$work"' EXIT
+export HOME="$work"
+cd "$work"
 
 check_output() {
     expected=$1

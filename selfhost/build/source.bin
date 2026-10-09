@@ -5510,8 +5510,50 @@ unit.end
 \ Bytes of the ELF launch adapter preceding the canonical image.
 12288   constant snapshot.wrapper.size
 
-\ Marker identifying a completely persisted definition checkpoint.
-$3150414e53485446 constant snapshot.magic
+\ Magic identifying the parent-linked binary snapshot format.
+$3250414e53485446 constant snapshot.magic
+
+\ Patch header: magic | parent ID | parent bytes | image bytes | span count.
+\ Each following span is: image offset | byte count | replacement bytes.
+\ Cells are little-endian 64-bit values; replacement bytes have no padding.
+\ Parent ID -1 denotes a root, whose patch contains the full canonical image.
+0       constant patch.magic
+
+\ Numeric revision of the parent in this project's snapshot collection.
+8       constant patch.parent
+
+\ Exact reconstructed parent extent, or zero for a root.
+16      constant patch.before
+
+\ Exact canonical image extent after applying the replacement spans.
+24      constant patch.after
+
+\ Number of ordered, nonoverlapping replacement spans.
+32      constant patch.count
+
+\ Bytes preceding the first replacement span.
+40      constant patch.header
+
+\ Bytes occupied by a span's offset and length cells.
+16      constant patch.span
+
+\ Maximum patch allocation: twice image.capacity, including span overhead.
+2097152 constant patch.capacity
+
+\ Linux syscall for obtaining the absolute working directory.
+79      constant syscall.getcwd
+
+\ Linux syscall for creating an anonymous executable file.
+319     constant syscall.memfd
+
+\ Linux syscall for executing an open file descriptor.
+322     constant syscall.execveat
+
+\ Close the anonymous executable descriptor after a successful exec.
+1       constant memfd.cloexec
+
+\ Resolve an empty exec pathname through the supplied descriptor.
+4096    constant execveat.empty.path
 
 \ Open flags for exclusive, close-on-exec checkpoint files.
 524481  constant snapshot.create.flags
@@ -5528,14 +5570,8 @@ variable snapshot.length
 \ Length of the candidate directory being written or restored.
 variable snapshot.work.length
 
-\ Source extent at the selected checkpoint, used to record the next delta.
-variable snapshot.base.length
-
 \ Image whose immutable bytes are currently being persisted.
 variable snapshot.image
-
-\ Initial source byte of the change stored in the candidate checkpoint.
-variable snapshot.change.start
 
 \ File descriptor currently used by checkpoint I/O, or minus one when closed.
 variable snapshot.fd
@@ -5549,14 +5585,8 @@ variable snapshot.io.length
 \ Numeric child directory suffix currently being attempted.
 variable snapshot.serial
 
-\ Parent directory length while allocating a numbered child.
-variable snapshot.parent.length
-
 \ Return status from the most recent filesystem operation.
 variable snapshot.status
-
-\ Address of an image-sized read buffer used to validate checkpoint files.
-variable snapshot.read.buffer
 
 \ Bytes read while validating an exact file extent.
 variable snapshot.read.length
@@ -5566,6 +5596,64 @@ variable snapshot.command
 
 \ True while automatic publication checkpoints are enabled.
 variable snapshot.enabled
+
+\ Collection directory for the operation in progress.
+variable snapshot.collection.length
+
+\ Parent revision for a save, or minus one for a new root.
+variable snapshot.parent.id
+
+\ Reconstructed parent image owned by a save transaction.
+variable snapshot.parent.image
+
+\ Reusable input and output patch allocation.
+variable snapshot.patch
+
+\ Number of valid bytes in the current patch buffer.
+variable snapshot.patch.length
+
+\ Cursor within the patch records being encoded or applied.
+variable snapshot.cursor
+
+\ Canonical image reconstructed by the current load operation.
+variable snapshot.result
+
+\ Bytes in the image produced by the preceding chain member.
+variable snapshot.result.length
+
+\ Reverse-ordered revision chain used during reconstruction.
+variable snapshot.chain
+
+\ Number of pending revisions in the reconstruction chain.
+variable snapshot.chain.count
+
+\ Revision currently being reconstructed or written.
+variable snapshot.id
+
+\ Revision requested by the caller of the loader.
+variable snapshot.target.id
+
+\ True only when loading the uncommitted revision being saved.
+variable snapshot.pending
+
+\ Offset of the next byte to compare or span to apply.
+variable snapshot.offset
+
+\ Length of a replacement span.
+variable snapshot.span.length
+
+\ Previous span's end, enforcing ordered nonoverlapping records.
+variable snapshot.end
+
+\ Number of replacement records still to apply.
+variable snapshot.records
+
+\ Last changed byte plus one when coalescing nearby changes.
+variable snapshot.changed.end
+
+\ Anonymous executable descriptor plus one; zero means none is owned.
+variable snapshot.memfd
+
 
 \ Return the current checkpoint pathname buffer.
 : snapshot.current snapshot.buffers @ ;
@@ -5582,7 +5670,7 @@ variable snapshot.enabled
 \ Allocate invocation-private path buffers and initialize descriptor state.
 : snapshot.init
   snapshot.buffers @ if ; then
-  0 page.size 6 * protection.read.write 34 -1 0 9 syscall6 dup 0 > require
+  0 page.size 9 * protection.read.write 34 -1 0 9 syscall6 dup 0 > require
   snapshot.buffers ! -1 snapshot.fd ! ;
 
 \ Close the active checkpoint descriptor, including after a failed operation.
@@ -5649,7 +5737,7 @@ variable snapshot.enabled
       dup 0= if drop snapshot.close snapshot.read.length @ ; then
       snapshot.read.length +!
     then
-repeat
+  repeat
   begin snapshot.fd @ context context.scratch + 128 + 1 0 0 0 0 syscall6
     dup syscall.interrupted <> until
   0= if snapshot.close snapshot.read.length @ ; then snapshot.fail ;
@@ -5661,18 +5749,225 @@ repeat
     swap 4 rshift swap r> 1-
   repeat drop 2drop ;
 
-\ Reserve a unique numbered child directory without touching existing checkpoints.
-: snapshot.child
-  snapshot.work.length @ snapshot.parent.length ! 0 snapshot.serial !
-  47 snapshot.work snapshot.parent.length @ + c!
-  snapshot.parent.length @ 9 + snapshot.work.length !
-  0 snapshot.work snapshot.work.length @ + c!
+\ Return the collection pathname retained while visiting its revisions.
+: snapshot.collection snapshot.buffers @ page.size 6 * + ;
+
+\ Return a scratch buffer for normalizing the requested pathname.
+: snapshot.target snapshot.buffers @ page.size 7 * + ;
+
+\ Return the reserved candidate directory, retained across parent loading.
+: snapshot.saved snapshot.buffers @ page.size 8 * + ;
+
+\ Reject malformed snapshots through the ordinary recoverable input boundary.
+: snapshot.need ( flag -- )
+  0= if s" Invalid snapshot: " input.error then ;
+
+\ Release transaction allocations after success, a compiler error or a signal.
+: snapshot.release
+  snapshot.close
+  snapshot.command @ if snapshot.command @ c.string.free 0 snapshot.command ! then
+  snapshot.memfd @ if snapshot.memfd @ 1- 0 0 0 0 0 3 syscall6 drop 0 snapshot.memfd ! then
+  snapshot.patch @ if snapshot.patch @ patch.capacity 0 0 0 0 11 syscall6 drop 0 snapshot.patch ! then
+  snapshot.chain @ if snapshot.chain @ image.free 0 snapshot.chain ! then
+  snapshot.result @ if snapshot.result @ image.free 0 snapshot.result ! then
+  snapshot.parent.image @ if snapshot.parent.image @ image.free 0 snapshot.parent.image ! then ;
+
+\ Allocate reusable patch and revision-chain storage for a transaction.
+: snapshot.allocate
+  snapshot.patch @ 0= if
+    0 patch.capacity protection.read.write 34 -1 0 9 syscall6
+    dup 0 > snapshot.need snapshot.patch !
+  then
+  snapshot.chain @ 0= if image.new snapshot.chain ! then ;
+
+\ Read a patch header cell using its named field offset.
+: snapshot.field ( field -- value ) snapshot.patch @ + @ ;
+
+\ Store a patch header cell using its named field offset.
+: snapshot.field! ( value field -- ) snapshot.patch @ + ! ;
+
+\ Normalize a relative or absolute counted path into the work buffer.
+: snapshot.absolute ( address length -- )
+  dup 0 > over page.size 128 - < and snapshot.need
+  dup >r snapshot.target swap move 0 snapshot.target r@ + c!
+  snapshot.target c@ 47 = if snapshot.target r> snapshot.path! ; then
+  snapshot.work page.size 128 - 0 0 0 0 syscall.getcwd syscall6 dup 0 > snapshot.need
+  1- snapshot.work.length !
+  snapshot.work.length @ r@ + 2 + page.size 64 - < snapshot.need
+  47 snapshot.work snapshot.work.length @ + c! 1 snapshot.work.length +!
+  snapshot.target snapshot.work snapshot.work.length @ + r@ move
+  r> snapshot.work.length +! 0 snapshot.work snapshot.work.length @ + c! ;
+
+\ Retain the work pathname as the active collection pathname.
+: snapshot.collection!
+  snapshot.work snapshot.collection snapshot.work.length @ 1+ move
+  snapshot.work.length @ snapshot.collection.length ! ;
+
+\ Select CWD/CWD-NAME.snapshots, creating the project collection when necessary.
+: snapshot.project
+  snapshot.work page.size 2 / 0 0 0 0 syscall.getcwd syscall6 dup 0 > snapshot.need
+  1- snapshot.work.length ! snapshot.work.length @ >r
+  snapshot.work.length @ dup 1 = if
+    drop s" root" snapshot.target swap move 4
+  else
+    begin 1- dup snapshot.work + c@ 47 = until 1+
+    dup >r snapshot.work + snapshot.target snapshot.work.length @ r> - dup >r move r>
+  then
+  >r
+  snapshot.work.length @ 1 > if 47 snapshot.work snapshot.work.length @ + c! 1 snapshot.work.length +! then
+  snapshot.target snapshot.work snapshot.work.length @ + r@ move r> snapshot.work.length +!
+  s" .snapshots" snapshot.work snapshot.work.length @ + swap move
+  10 snapshot.work.length +! 0 snapshot.work snapshot.work.length @ + c!
+  snapshot.mkdir snapshot.collection!
+  r> snapshot.work.length ! 0 snapshot.work snapshot.work.length @ + c! snapshot.sync.directory ;
+
+\ Build the pathname of a numbered revision in the retained collection.
+: snapshot.node ( revision -- )
+  snapshot.collection snapshot.collection.length @ snapshot.path!
+  47 snapshot.work snapshot.work.length @ + c!
+  snapshot.work snapshot.work.length @ + 1+ snapshot.number
+  9 snapshot.work.length +! 0 snapshot.work snapshot.work.length @ + c! ;
+
+\ Parse the final eight hexadecimal pathname characters as a revision ID.
+: snapshot.identify
+  snapshot.work.length @ 9 > snapshot.need
+  snapshot.work snapshot.work.length @ + 9 - c@ 47 = snapshot.need
+  0 snapshot.id ! snapshot.work snapshot.work.length @ + 8 - 8
+  begin dup while
+    >r dup c@ dup 48 >= over 57 <= and if 48 - else
+      dup 97 >= over 102 <= and snapshot.need 87 -
+    then snapshot.id @ 4 lshift + snapshot.id ! 1+ r> 1-
+  repeat 2drop
+  -9 snapshot.work.length +! 0 snapshot.work snapshot.work.length @ + c!
+  snapshot.collection! snapshot.id @ snapshot.target.id ! ;
+
+\ Read and check one committed patch, permitting only the pending target to lack its marker.
+: snapshot.patch.read
+  snapshot.id @ snapshot.node
+  snapshot.pending @ snapshot.id @ snapshot.target.id @ = and 0= if
+    s" /complete" snapshot.filename snapshot.wrapper 8 snapshot.read 8 = snapshot.need
+    snapshot.wrapper @ snapshot.magic = snapshot.need
+  then
+  s" /image.patch" snapshot.filename snapshot.patch @ patch.capacity snapshot.read snapshot.patch.length !
+  snapshot.patch.length @ patch.header >= snapshot.need
+  patch.magic snapshot.field snapshot.magic = snapshot.need
+  patch.after snapshot.field dup source.start >= swap image.capacity <= and snapshot.need
+  patch.before snapshot.field dup 0 >= swap image.capacity <= and snapshot.need
+  patch.parent snapshot.field dup -1 = swap snapshot.id @ u< or snapshot.need ;
+
+\ Validate canonical extents before any reconstructed image is made executable.
+: snapshot.image.check
+  snapshot.result @ header.magic + @ image.magic = snapshot.need
+  snapshot.result @ header.version + @ image.version = snapshot.need
+  snapshot.result @ header.image.size + @ snapshot.result.length @ = snapshot.need
+  snapshot.result @ header.source.offset + @ source.start = snapshot.need
+  snapshot.result @ header.source.length + @ dup 0 > swap image.capacity source.start - <= and snapshot.need
+  snapshot.result @ header.source.length + @ source.start + page.align snapshot.result.length @ = snapshot.need
+  snapshot.result @ header.code.limit + @ dup code.start >= swap dictionary.start <= and snapshot.need
+  snapshot.result @ header.dictionary.limit + @ dup dictionary.start >= swap source.start <= and snapshot.need
+  snapshot.result @ header.start.xt + @ dup code.start >=
+  swap snapshot.result @ header.code.limit + @ < and snapshot.need
+  snapshot.result @ header.context.limit + @ context.control <= snapshot.need ;
+
+\ Apply checked replacement spans, rejecting overlaps, overflow and trailing bytes.
+: snapshot.apply
+  patch.before snapshot.field snapshot.result.length @ = snapshot.need
+  patch.after snapshot.field snapshot.result.length !
+  patch.count snapshot.field dup 0 >= swap snapshot.patch.length @ patch.span / <= and snapshot.need
+  patch.count snapshot.field snapshot.records ! patch.header snapshot.cursor ! 0 snapshot.end !
+  begin snapshot.records @ while
+    snapshot.patch.length @ snapshot.cursor @ - patch.span >= snapshot.need
+    snapshot.patch @ snapshot.cursor @ + dup @ snapshot.offset ! cell+ @ snapshot.span.length !
+    patch.span snapshot.cursor +!
+    snapshot.offset @ snapshot.end @ >= snapshot.need
+    snapshot.offset @ snapshot.result.length @ <= snapshot.need
+    snapshot.span.length @ 0 > snapshot.need
+    snapshot.span.length @ snapshot.result.length @ snapshot.offset @ - <= snapshot.need
+    snapshot.span.length @ snapshot.patch.length @ snapshot.cursor @ - <= snapshot.need
+    snapshot.patch @ snapshot.cursor @ + snapshot.result @ snapshot.offset @ + snapshot.span.length @ move
+    snapshot.span.length @ snapshot.cursor +!
+    snapshot.offset @ snapshot.span.length @ + snapshot.end ! -1 snapshot.records +!
+  repeat
+  snapshot.cursor @ snapshot.patch.length @ = snapshot.need
+  snapshot.result @ snapshot.result.length @ + image.capacity snapshot.result.length @ - erase
+  snapshot.image.check ;
+
+\ Reconstruct a revision by following parents backwards and applying them forwards.
+\ SNAPSHOT.PENDING is private to the save transaction; public callers clear it.
+: snapshot.reconstruct ( address length -- )
+  snapshot.allocate snapshot.absolute snapshot.identify 0 snapshot.chain.count !
   begin
-    snapshot.serial @ snapshot.work snapshot.parent.length @ + 1+ snapshot.number
+    snapshot.chain.count @ image.capacity 8 / < snapshot.need
+    snapshot.id @ snapshot.chain @ snapshot.chain.count @ cells + ! 1 snapshot.chain.count +!
+    snapshot.patch.read patch.parent snapshot.field dup -1 <>
+  while snapshot.id ! repeat drop
+  snapshot.result @ 0= snapshot.need image.new snapshot.result ! 0 snapshot.result.length !
+  -1 snapshot.status !
+  begin snapshot.chain.count @ while
+    -1 snapshot.chain.count +!
+    snapshot.chain @ snapshot.chain.count @ cells + @ snapshot.id ! snapshot.patch.read
+    patch.parent snapshot.field snapshot.status @ = snapshot.need
+    snapshot.apply snapshot.id @ snapshot.status !
+  repeat ;
+
+\ Reconstruct a committed canonical image; the caller owns the returned mapping.
+: snapshot.load ( address length -- image )
+  snapshot.init 0 snapshot.pending ! snapshot.reconstruct
+  snapshot.result @ 0 snapshot.result ! snapshot.release ;
+
+\ Reserve a flat revision directory with an ID greater than its parent.
+: snapshot.reserve
+  snapshot.parent.id @ 1+ snapshot.serial !
+  begin
+    snapshot.serial @ $ffffffff <= snapshot.need
+    snapshot.serial @ snapshot.node
     snapshot.work 448 0 0 0 0 83 syscall6 dup -17 = if
       drop 1 snapshot.serial +!
-    else snapshot.ok ; then
+    else snapshot.ok snapshot.work snapshot.saved snapshot.work.length @ 1+ move ; then
   again ;
+
+\ Test whether a candidate byte differs from its zero-padded reconstructed parent.
+: snapshot.different? ( offset -- flag )
+  dup snapshot.image @ + c@ swap
+  snapshot.parent.image @ if snapshot.parent.image @ + c@ else drop 0 then <> ;
+
+\ Append one replacement record from the candidate image.
+: snapshot.span.write ( offset length -- )
+  snapshot.span.length ! snapshot.offset !
+  snapshot.cursor @ patch.span + snapshot.span.length @ + patch.capacity <= snapshot.need
+  snapshot.offset @ snapshot.patch @ snapshot.cursor @ + !
+  snapshot.span.length @ snapshot.patch @ snapshot.cursor @ + cell+ !
+  patch.span snapshot.cursor +!
+  snapshot.image @ snapshot.offset @ + snapshot.patch @ snapshot.cursor @ + snapshot.span.length @ move
+  snapshot.span.length @ snapshot.cursor +!
+  1 snapshot.patch @ patch.count + +! ;
+
+\ Encode replacements, coalescing gaps no larger than a record header.
+: snapshot.encode
+  snapshot.allocate snapshot.patch @ patch.header erase
+  snapshot.magic patch.magic snapshot.field! snapshot.parent.id @ patch.parent snapshot.field!
+  snapshot.parent.image @ dup if header.image.size + @ then patch.before snapshot.field!
+  snapshot.image @ header.image.size + @ patch.after snapshot.field!
+  patch.header snapshot.cursor !
+  snapshot.parent.id @ -1 = if
+    0 patch.after snapshot.field snapshot.span.write
+  else
+    0 snapshot.offset !
+    begin snapshot.offset @ patch.after snapshot.field < while
+      snapshot.offset @ snapshot.different? if
+        snapshot.offset @ >r snapshot.offset @ 1+ snapshot.changed.end !
+        begin
+          1 snapshot.offset +!
+          snapshot.offset @ patch.after snapshot.field <
+          snapshot.offset @ snapshot.changed.end @ - patch.span <= and
+        while
+          snapshot.offset @ snapshot.different? if snapshot.offset @ 1+ snapshot.changed.end ! then
+        repeat
+        r> snapshot.offset @ >r
+        snapshot.changed.end @ over - snapshot.span.write r> snapshot.offset !
+      else 1 snapshot.offset +! then
+    repeat
+  then snapshot.cursor @ snapshot.patch.length ! ;
 
 unit.end
 
@@ -5862,49 +6157,76 @@ variable elf.assembler.cursor
 \ Generate the entire ELF adapter from native source for the selected image.
 : snapshot.elf elf.build ;
 
-\ Persist exact image/source/delta files and a runnable executable, committing last.
-: snapshot.persist
-  snapshot.elf
-  s" /image.bin" snapshot.filename 384 snapshot.create
-  snapshot.image @ dup header.image.size + @ snapshot.write snapshot.finish
-  s" /forth.f" snapshot.filename 384 snapshot.create
-  snapshot.image @ source.start + snapshot.image @ header.source.length + @ snapshot.write snapshot.finish
-  s" /change.f" snapshot.filename 384 snapshot.create
-  snapshot.image @ source.start + snapshot.change.start @ +
-  snapshot.image @ header.source.length + @ snapshot.change.start @ - snapshot.write snapshot.finish
-  s" /forth" snapshot.filename 448 snapshot.create
+\ Execute the anonymous reconstructed image with the owned command as argv[1].
+: snapshot.memory.exec ( -- error )
+  snapshot.work context context.scratch + !
+  snapshot.command @ context context.scratch + cell+ !
+  0 context context.scratch + 16 + ! 0 context context.scratch + 32 + !
+  snapshot.memfd @ 1- context context.scratch + 32 + context context.scratch +
+  context arguments.vector.field + @ context arguments.count.field + @ cells +
+  execveat.empty.path 0 syscall.execveat syscall6 ;
+
+\ Generate an anonymous ELF executable from the reconstructed canonical image.
+: snapshot.executable
+  snapshot.image @ >r snapshot.result @ snapshot.image ! snapshot.elf
+  0 context context.scratch + 32 + !
+  context context.scratch + 32 + memfd.cloexec 0 0 0 0 syscall.memfd syscall6
+  dup 0 >= snapshot.need dup 1+ snapshot.memfd ! snapshot.fd !
   snapshot.wrapper snapshot.wrapper.size snapshot.write
-  snapshot.image @ dup header.image.size + @ snapshot.write snapshot.finish
-  snapshot.sync.directory
+  snapshot.result @ snapshot.result.length @ snapshot.write
+  -1 snapshot.fd ! r> snapshot.image ! ;
+
+\ Require Binary A == Binary B using A's compiler in a fresh native process.
+: snapshot.check
+  snapshot.executable
+  s" verify? 0= 2 and process.exit" c.string snapshot.command !
+  0 0 0 0 0 0 57 syscall6 dup 0 < if snapshot.fail then
+  dup 0= if
+    drop 0 0 0 0 0 0 3 syscall6 drop
+    snapshot.memory.exec drop 2 process.exit
+  then
+  >r begin r@ context context.scratch + 64 + 0 0 0 0 61 syscall6
+    dup syscall.interrupted <> until
+  r> = snapshot.need snapshot.command @ c.string.free 0 snapshot.command !
+  context context.scratch + 64 + @ if s" Snapshot source verification failed: " input.error then ;
+
+\ Write a patch, reconstruct it from disk, verify its compiler and commit last.
+: snapshot.persist
+  snapshot.reserve snapshot.encode
+  s" /image.patch" snapshot.filename 384 snapshot.create
+  snapshot.patch @ snapshot.patch.length @ snapshot.write snapshot.finish
+  snapshot.parent.image @ if snapshot.parent.image @ image.free 0 snapshot.parent.image ! then
+  -1 snapshot.pending ! snapshot.saved dup string.length snapshot.reconstruct
+  snapshot.image @ snapshot.result @ image.equal? snapshot.need snapshot.check
   s" /complete" snapshot.filename 384 snapshot.create
   snapshot.magic snapshot.wrapper ! snapshot.wrapper 8 snapshot.write snapshot.finish
   snapshot.sync.directory
-  snapshot.work.length @ >r snapshot.parent.length @ snapshot.work.length !
-  0 snapshot.work snapshot.work.length @ + c! snapshot.sync.directory
-  47 snapshot.work snapshot.work.length @ + c! r> snapshot.work.length !
-  snapshot.work snapshot.current snapshot.work.length @ 1+ move
-  snapshot.work.length @ snapshot.length !
-  snapshot.image @ header.source.length + @ snapshot.base.length ! ;
+  snapshot.collection snapshot.collection.length @ snapshot.path! snapshot.sync.directory
+  snapshot.saved dup string.length dup snapshot.length ! 1+ snapshot.current swap move
+  snapshot.release ;
 
-\ Save the startup dictionary as a root before recording its first edited child.
-: snapshot.root
-  history.home dup page.size 128 - < require
-  snapshot.path!
-  s" /.forth.d" snapshot.filename snapshot.file dup string.length snapshot.path! snapshot.mkdir
-  s" /checkpoints" snapshot.filename snapshot.file dup string.length snapshot.path! snapshot.mkdir
-  snapshot.child editor.current snapshot.image ! 0 snapshot.change.start ! snapshot.persist ;
-
-\ Persist a candidate before the editor makes its definitions visible.
+\ Save a project root before its first child, then commit the candidate image.
 : snapshot.publish ( image -- )
   snapshot.enabled @ 0= if drop ; then
-  >r snapshot.init snapshot.length @ 0= if snapshot.root then
-  snapshot.current snapshot.length @ snapshot.path! snapshot.child
-  r> snapshot.image ! snapshot.base.length @ snapshot.change.start ! snapshot.persist ;
+  >r snapshot.init snapshot.project
+  snapshot.length @ snapshot.collection.length @ 9 + = if
+    snapshot.current snapshot.collection snapshot.collection.length @ bytes.equal? 0= if 0 snapshot.length ! then
+  else 0 snapshot.length ! then
+  snapshot.length @ 0= if
+    -1 snapshot.parent.id ! editor.current snapshot.image ! snapshot.persist
+  then
+  0 snapshot.pending ! snapshot.current snapshot.length @ snapshot.reconstruct
+  snapshot.result @ snapshot.parent.image ! 0 snapshot.result !
+  snapshot.target.id @ snapshot.parent.id !
+  r> snapshot.image ! snapshot.persist ;
 
-\ Save an explicit checkpoint, including when there are no newly compiled definitions.
-: checkpoint
+\ Save and verify the current definitions and source, then display the snapshot path.
+: snapshot
   editor.stage @ 0= require editor.current snapshot.publish
-  s" Checkpoint: " type snapshot.current snapshot.length @ type cr ;
+  s" Snapshot: " type snapshot.current snapshot.length @ type cr ;
+
+\ Save the current system using the original checkpoint command name.
+: checkpoint snapshot ;
 
 \ Return the rest of this input line as a pathname and consume it.
 : snapshot.path.parse ( -- address length )
@@ -5922,40 +6244,23 @@ variable elf.assembler.cursor
 \ File out the source of the currently selected system to the following pathname.
 : source.save snapshot.path.parse source.write ;
 
-\ Recognize a committed executable checkpoint from the actual executable pathname.
-: snapshot.boot
-  snapshot.init -1 snapshot.enabled !
-  s" /proc/self/exe" c.string >r
-  r@ snapshot.work page.size 64 - 0 0 0 89 syscall6 r> c.string.free
-  dup 0 < if drop ; then snapshot.work.length !
-  begin snapshot.work.length @ while
-    -1 snapshot.work.length +!
-    snapshot.work snapshot.work.length @ + c@ 47 = if
-      0 snapshot.work snapshot.work.length @ + c!
-      s" /complete" snapshot.filename
-      snapshot.file 524288 0 0 0 0 syscall.open syscall6 dup 0 < if drop ; then
-      snapshot.fd ! snapshot.fd @ snapshot.wrapper 8 0 0 0 0 syscall6
-      8 = snapshot.wrapper @ snapshot.magic = and snapshot.status ! snapshot.close
-      snapshot.status @ if
-        snapshot.work snapshot.current snapshot.work.length @ 1+ move
-        snapshot.work.length @ snapshot.length ! org header.source.length + @ snapshot.base.length !
-      then ;
-    then
-  repeat ;
+\ Initialize project snapshot services without retaining runtime state from disk.
+: snapshot.boot snapshot.init -1 snapshot.enabled ! ;
 
-\ Validate the checkpoint's file copies and self-compilation in a disposable process.
-: snapshot.validate
-  snapshot.length @ 0 > require
-  snapshot.current snapshot.length @ snapshot.path! image.new snapshot.read.buffer !
-  s" /image.bin" snapshot.filename snapshot.read.buffer @ image.capacity snapshot.read
-  org header.image.size + @ = require org snapshot.read.buffer @ image.equal? require
-  s" /forth.f" snapshot.filename snapshot.read.buffer @ image.capacity snapshot.read
-  org header.source.length + @ = require
-  snapshot.read.buffer @ org source.start + org header.source.length + @ bytes.equal? require
-  snapshot.read.buffer @ image.free verify? require
-  0 0 0 0 0 0 60 syscall6 drop ;
+\ Verify a committed snapshot using its own compiler without adopting it.
+: snapshot.verify
+  snapshot.path.parse snapshot.init 0 snapshot.pending ! snapshot.reconstruct
+  snapshot.check snapshot.release s" Snapshot verification passed." type cr ;
+
+\ Bind a restored image to its disk revision and enter the ordinary editor.
+: snapshot.enter
+  snapshot.path.parse 0 snapshot.pending ! snapshot.reconstruct
+  org snapshot.result @ image.equal? snapshot.need
+  snapshot.work snapshot.current snapshot.work.length @ 1+ move
+  snapshot.work.length @ snapshot.length ! snapshot.release quit ;
 
 \ Replace this process with the candidate executable, optionally running validation.
+\ Native file builds retain this pathname-based launcher independently of snapshots.
 : snapshot.exec ( validate -- error )
   if snapshot.command @ else 0 then context context.scratch + cell+ !
   snapshot.file context context.scratch + ! 0 context context.scratch + 16 + !
@@ -5963,21 +6268,13 @@ variable elf.assembler.cursor
   context arguments.vector.field + @ context arguments.count.field + @ cells +
   0 0 0 59 syscall6 ;
 
-\ Validate and restore a checkpoint in a fresh process, discarding runtime pointers.
+\ Verify and restore a reconstructed image with fresh variables, stacks and C handles.
 : snapshot.restore ( address length -- )
-  snapshot.init snapshot.path! s" /forth" snapshot.filename
-  s" snapshot.validate" c.string snapshot.command !
-  0 0 0 0 0 0 57 syscall6 dup 0 < if snapshot.fail then
-  dup 0= if
-    drop 0 0 0 0 0 0 3 syscall6 drop
-    -1 snapshot.exec drop 2 0 0 0 0 0 60 syscall6 drop ;
-  then
-  >r begin r@ context context.scratch + 64 + 0 0 0 0 61 syscall6
-    dup syscall.interrupted <> until
-  r> = require
-  snapshot.command @ c.string.free
-  context context.scratch + 64 + @ 0<> if s" Checkpoint validation failed: " input.error then
-  0 snapshot.exec snapshot.ok ;
+  snapshot.init 0 snapshot.pending ! snapshot.reconstruct snapshot.check
+  s" snapshot.enter " snapshot.target swap move
+  snapshot.work snapshot.target 15 + snapshot.work.length @ move
+  snapshot.target snapshot.work.length @ 15 + c.string snapshot.command !
+  snapshot.memory.exec snapshot.ok ;
 
 \ Source file buffer owned by a native replacement build.
 variable build.source.buffer
@@ -5996,7 +6293,7 @@ variable build.candidate
   then
   >r begin r@ context context.scratch + 64 + 0 0 0 0 61 syscall6
     dup syscall.interrupted <> until
-  r> = require snapshot.command @ c.string.free
+  r> = require snapshot.command @ c.string.free 0 snapshot.command !
   context context.scratch + 64 + @ if
     s" Native build worker failed; output was not published." type cr 2 process.exit
   then ;
@@ -6059,10 +6356,11 @@ variable build.candidate
 
 \ Restore the parent checkpoint, preserving the abandoned branch on disk.
 : undo
-  snapshot.length @ 0 > require snapshot.length @
-  begin dup while 1- snapshot.current over + c@ 47 = if
-    snapshot.current swap snapshot.restore ; then
-  repeat drop s" No parent checkpoint: " input.error ;
+  snapshot.length @ 0 > snapshot.need
+  0 snapshot.pending ! snapshot.current snapshot.length @ snapshot.reconstruct
+  patch.parent snapshot.field dup -1 = if drop snapshot.release s" No parent snapshot: " input.error then
+  snapshot.node snapshot.work snapshot.saved snapshot.work.length @ 1+ move
+  snapshot.release snapshot.saved dup string.length snapshot.restore ;
 
 \ Display the selected checkpoint path for filesystem browsing or later restoration.
 : checkpoint.path
@@ -6282,10 +6580,10 @@ unit.end
   s" recovery.resume" compiler.xt org + context recovery.continuation.field + !
   recovery.enter dup if
     process.signal.exit + input.status !
-    stacks.reset tui.reset debug.terminal.close history.draft.free fault. debug.dispatch editor.cancel source.load.release stacks.reset ;
+    stacks.reset tui.reset debug.terminal.close history.draft.free fault. debug.dispatch editor.cancel source.load.release snapshot.release stacks.reset ;
   then drop
-  context input.error.field + @ dup if input.status ! tui.reset debug.terminal.close editor.cancel source.load.release ; then drop
-  context quit.request.field + @ if tui.reset debug.terminal.close editor.cancel source.load.release then
+  context input.error.field + @ dup if input.status ! tui.reset debug.terminal.close editor.cancel source.load.release snapshot.release ; then drop
+  context quit.request.field + @ if tui.reset debug.terminal.close editor.cancel source.load.release snapshot.release then
   input.eof @ 0= input.length @ 0<> or if 0 input.status ! then ;
 
 \ Read fresh commands until EOF, retaining normal stack state between lines.

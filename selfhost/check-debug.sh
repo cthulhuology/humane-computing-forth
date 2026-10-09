@@ -1,7 +1,11 @@
 #!/bin/sh
 # Debugger hooks execute as native Forth in an isolated context after sigreturn.
 set -eu
-runtime=${1:-./forth}
+runtime=$(realpath "${1:-./forth}")
+work=$(mktemp -d)
+trap 'rm -rf "$work"' EXIT
+export HOME="$work"
+cd "$work"
 
 require_text() {
     case "$output" in

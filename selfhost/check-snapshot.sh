@@ -1,64 +1,96 @@
 #!/bin/sh
-# Check native checkpoint transactions, fresh restores, branching and pruning.
+# Native parent patches, project storage, self-verification, restore and pruning.
 set -eu
 runtime=$(realpath "${1:-./forth}")
+project=$(dirname "$runtime")
+decoder="$project/selfhost/reconstruct-snapshot.rb"
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 export HOME="$work/home with spaces"
-mkdir -p "$HOME"
+mkdir -p "$HOME" "$work/project with spaces"
+cd "$work/project with spaces"
+collection="$PWD/project with spaces.snapshots"
 output=$(printf 'variable counter\n99 counter !\n: value 11 ;\n: value 22 ;\nundo\ncounter @ . value . fdepth . depth . cr\n: value 33 ;\nvalue . verify? . cr\nsource.save %s\ncheckpoints\nbye\n' "$work/export.f" | "$runtime")
 case "$output" in *'0 11 0 0 '*'33 -1 '*) ;; *) printf '%s\n' "$output"; exit 1;; esac
-root="$HOME/.forth.d/checkpoints/00000000"
-a="$root/00000000/00000000"
-b="$a/00000000"
-c="$a/00000001"
-for node in "$root" "$root/00000000" "$a" "$b" "$c"; do
-  test -x "$node/forth"
+root="$collection/00000000"
+a="$collection/00000002"
+b="$collection/00000003"
+c="$collection/00000004"
+for node in "$root" "$collection/00000001" "$a" "$b" "$c"; do
+  test "$(find "$node" -type f | wc -l)" -eq 2
   test "$(wc -c < "$node/complete")" -eq 8
-  "$node/forth" snapshot.validate
+  "$runtime" snapshot.verify "$node" </dev/null | grep -q 'Snapshot verification passed.'
+  ruby "$decoder" "$node" "$work/image.bin" "$work/source.f"
 done
-cmp "$work/export.f" "$c/forth.f"
-cat "$a/forth.f" "$b/change.f" > "$work/reconstructed.f"
-cmp "$work/reconstructed.f" "$b/forth.f"
-cat "$a/forth.f" "$c/change.f" > "$work/reconstructed.f"
-cmp "$work/reconstructed.f" "$c/forth.f"
+cmp "$work/export.f" "$work/source.f"
+test "$(wc -c < "$c/image.patch")" -lt 4096
+ruby -e 'ARGV.each { |p| abort "wrong parent" unless File.binread(p)[8,8].unpack1("Q<") == 2 }' "$b/image.patch" "$c/image.patch"
 output=$(printf 'restore %s\nvalue . counter @ . verify? . cr\nbye\n' "$b" | "$runtime")
 case "$output" in *'22 0 -1 '*) ;; *) printf '%s\n' "$output"; exit 1;; esac
-# A corrupted or incomplete candidate must leave the caller and its input intact.
-printf x >> "$b/image.bin"
-output=$(printf 'restore %s\n42 . cr\nrestore /nonexistent\n43 . cr\nbye\n' "$b" | "$runtime")
-case "$output" in *'Checkpoint validation failed:'*'42 '*'Checkpoint validation failed:'*'43 '*) ;; *) printf '%s\n' "$output"; exit 1;; esac
-mkdir "$work/incomplete"
-cp "$runtime" "$work/incomplete/forth"
-output=$(printf 'restore %s\n44 . cr\nbye\n' "$work/incomplete" | "$runtime")
-case "$output" in *'Checkpoint validation failed:'*'44 '*) ;; *) printf '%s\n' "$output"; exit 1;; esac
-# Source export must not replace a user's existing file.
+# Relative paths work too; undo at a root stays in its editor.
+output=$(printf 'restore project with spaces.snapshots/00000000\nundo\n42 . cr\nbye\n' | "$runtime")
+case "$output" in *'No parent snapshot:'*'42 '*) ;; *) printf '%s\n' "$output"; exit 1;; esac
+cp "$b/image.patch" "$work/good.patch"
+# Well-formed code/source disagreement must fail the image's own compiler check.
+ruby -e 'p=ARGV[0];s=File.binread(p);abort "fixture source absent" unless s.include?(": value 22 ;");File.binwrite(p,s.sub(": value 22 ;",": value 23 ;"))' "$b/image.patch"
+output=$(printf 'restore %s\n43 . cr\nbye\n' "$b" | "$runtime")
+case "$output" in *'Snapshot source verification failed:'*'43 '*) ;; *) printf '%s\n' "$output"; exit 1;; esac
+# A failed automatic commit leaves the old definition and releases its buffers.
+output=$(printf 'restore %s\n: verify? 0 ;\nverify? . snapshot.result @ . snapshot.patch @ . depth . cr\nbye\n' "$c" | "$runtime")
+case "$output" in *'Snapshot source verification failed:'*'-1 0 0 0 '*) ;; *) printf '%s\n' "$output"; exit 1;; esac
+# Structural corruption, forward parents, truncation and absent markers all fail safely.
+for damage in trailing parent offset length truncate marker; do
+  cp "$work/good.patch" "$b/image.patch"
+  ruby -e 'p,kind=ARGV;s=File.binread(p);case kind;when "trailing";s << "x";when "parent";s[8,8]=[3].pack("Q<");when "offset";s[40,8]=[1048576].pack("Q<");when "length";s[48,8]=[0xffffffffffffffff].pack("Q<");when "truncate";s=s[0,39];when "marker";File.unlink(File.join(File.dirname(p),"complete"));end;File.binwrite(p,s)' "$b/image.patch" "$damage"
+  output=$(printf 'restore %s\n44 . cr\nsnapshot.result @ . snapshot.patch @ . snapshot.memfd @ . depth . cr\nbye\n' "$b" | "$runtime")
+  case "$output" in *'44 '*'0 0 0 0 '*) ;; *) printf '%s\n' "$output"; exit 1;; esac
+  case "$output" in *'Invalid snapshot:'*|*'Checkpoint I/O failed:'*) ;; *) exit 1;; esac
+done
+# Source export never replaces an existing file.
 output=$(printf 'source.save %s\n45 . cr\nbye\n' "$work/export.f" | "$runtime")
 case "$output" in *'Checkpoint I/O failed:'*'45 '*) ;; *) printf '%s\n' "$output"; exit 1;; esac
-cmp "$work/export.f" "$c/forth.f"
+# Saving follows chdir and names each collection after the new working directory.
+mkdir "$work/other project"
+output=$(printf 'restore %s\n: switch s" %s/other project" chdir drop ;\nswitch\n: elsewhere 51 ;\ncheckpoint.path\nvalue . elsewhere . cr\nbye\n' "$c" "$work" | "$runtime")
+case "$output" in *"$work/other project/other project.snapshots/00000001"*'33 51 '*) ;; *) printf '%s\n' "$output"; exit 1;; esac
 # A failed automatic save must not publish the definition.
 mkdir "$work/failure"
-printf blocked > "$work/failure/.forth.d"
-output=$(printf ': unpublished 19 ;\n46 . cr\nunpublished\nbye\n' | HOME="$work/failure" "$runtime")
+printf blocked > "$work/failure/failure.snapshots"
+output=$(cd "$work/failure"; printf ': unpublished 19 ;\n46 . cr\nunpublished\nbye\n' | "$runtime")
 case "$output" in *'Checkpoint I/O failed:'*'46 '*'Unknown command word: unpublished'*) ;; *) printf '%s\n' "$output"; exit 1;; esac
-# Pruning removes an unused old name, retains direct references and replays exactly.
+# Pruning retains references and replays its decisions through patch reconstruction.
 mkdir "$work/prune"
-output=$(printf ': unused 11 ;\n: unused 22 ;\nprune\n: used 31 ;\n: caller used ;\n: used 32 ;\nprune\nunused . caller . used . verify? . cr\nsource.save %s\ncheckpoints\nbye\n' "$work/pruned.f" | HOME="$work/prune" "$runtime")
+output=$(cd "$work/prune"; printf ': unused 11 ;\n: unused 22 ;\nprune\n: used 31 ;\n: caller used ;\n: used 32 ;\nprune\nunused . caller . used . verify? . cr\nsource.save %s\ncheckpoints\nbye\n' "$work/pruned.f" | "$runtime")
 case "$output" in *'1 superseded dictionary entries pruned.'*'0 superseded dictionary entries pruned.'*'22 31 32 -1 '*) ;; *) printf '%s\n' "$output"; exit 1;; esac
 grep -q ' entry.hide$' "$work/pruned.f"
 last=$(printf '%s\n' "$output" | tail -n 1)
-"$last/forth" snapshot.validate
-# A saved execution token remains a reference even without a compiled direct call.
+"$runtime" snapshot.verify "$last" </dev/null
+ruby "$decoder" "$last" "$work/pruned.bin" "$work/replayed.f"
+cmp "$work/pruned.f" "$work/replayed.f"
 mkdir "$work/pointer"
-output=$(printf "variable held\n: saved 17 ;\n' saved held !\n: saved 18 ;\nprune\nheld @ execute . saved . verify? . cr\nbye\n" | HOME="$work/pointer" "$runtime")
+output=$(cd "$work/pointer"; printf "variable held\n: saved 17 ;\n' saved held !\n: saved 18 ;\nprune\nheld @ execute . saved . verify? . cr\nbye\n" | "$runtime")
 case "$output" in *'0 superseded dictionary entries pruned.'*'17 18 -1 '*) ;; *) printf '%s\n' "$output"; exit 1;; esac
-# Seed the same pruned source with SwiftForth: no target-only pruning decisions.
+# Unchanged revisions store no spans; growth and shrink reproduce exact images.
+mkdir "$work/extents"
+ruby -e 'File.write(ARGV[0], 92.chr + " retained source padding " + "x" * 8192 + "\n")' "$work/padding.f"
+output=$(cd "$work/extents"; printf 'checkpoint\norg\nsource.load %s\nsnapshot.publish\ncheckpoint.path\nbye\n' "$work/padding.f" | "$runtime")
+base="$work/extents/extents.snapshots"
+test "$(wc -c < "$base/00000001/image.patch")" -eq 40
+ruby "$decoder" "$base/00000000" "$work/base.bin"
+ruby "$decoder" "$base/00000002" "$work/grown.bin"
+ruby "$decoder" "$base/00000003" "$work/shrunk.bin"
+test "$(wc -c < "$work/grown.bin")" -gt "$(wc -c < "$work/base.bin")"
+cmp "$work/base.bin" "$work/shrunk.bin"
+"$runtime" snapshot.verify "$base/00000003" </dev/null
+# Copying a complete project collection preserves its parent references.
+cp -r "$base" "$work/moved.snapshots"
+"$runtime" snapshot.verify "$work/moved.snapshots/00000003" </dev/null
 
 if [ "${VALIDATE_SF:-0}" = 1 ]; then
   mkdir -p "$work/seed/selfhost/build"
   cp "$work/pruned.f" "$work/seed/forth.f"
-  cp "$(dirname "$runtime")/shim.f" "$work/seed/shim.f"
+  cp "$project/shim.f" "$work/seed/shim.f"
   (cd "$work/seed" && "${SF:-sf}" shim.f)
-  cmp "$last/image.bin" "$work/seed/selfhost/build/image.bin"
+  cmp "$work/pruned.bin" "$work/seed/selfhost/build/image.bin"
 fi
-printf 'Native checkpoints, branching, source export, restore rejection and pruning passed.\n'
+printf 'Native project snapshots, compact patches, self-verification, branching and rejection passed.\n'

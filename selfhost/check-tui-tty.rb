@@ -41,7 +41,7 @@ Dir.mktmpdir do |home|
     master, slave = PTY.open
     slave.winsize = [50, columns]
     original = IO.popen(['stty', '-g'], in: slave, &:read)
-    pid = Process.spawn({'HOME' => home}, RUNTIME, 'see dup', 'quit', in: slave, out: slave, err: slave)
+    pid = Process.spawn({'HOME' => home}, RUNTIME, 'see dup', 'quit', in: slave, out: slave, err: slave, chdir: home)
     begin
       # A marker after inspection avoids depending on pauses to identify complete output.
       master.write("777 . cr\n")

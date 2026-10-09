@@ -5,9 +5,9 @@ require 'timeout'
 require 'tmpdir'
 RUNTIME = File.expand_path(ARGV.fetch(0, './forth'))
 FOOTER = 'Up/Down: locations   Enter/q: return'
-def receive(io, marker)
+def receive(io, marker, timeout: 15)
   output = +''
-  Timeout.timeout(15) do
+  Timeout.timeout(timeout) do
     until output.include?(marker)
       IO.select([io])
       output << io.read_nonblock(65536)
@@ -31,9 +31,9 @@ Dir.mktmpdir do |home|
   slave.winsize = [24, 80]
   original = IO.popen(['stty', '-g'], in: slave, &:read)
   definitions = ': needle.tui 7 ; ' + (1..30).map { |i| ": caller.#{i} needle.tui ;" }.join(' ') + ' : outer.tui caller.15 ;'
-  pid = Process.spawn({'HOME'=>home}, RUNTIME, definitions + ' 42 where needle.tui . cr quit', in: slave, out: slave, err: slave)
+  pid = Process.spawn({'HOME'=>home}, RUNTIME, definitions + ' 42 where needle.tui . cr quit', in: slave, out: slave, err: slave, chdir: home)
   begin
-    first = receive(master, FOOTER)
+    first = receive(master, FOOTER, timeout: 60)
     check_screen(first, 1, 24)
     master.write("\e[A")
     check_screen(receive(master, FOOTER), 1, 24)

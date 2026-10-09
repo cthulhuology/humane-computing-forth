@@ -42,7 +42,7 @@ Dir.mktmpdir do |home|
   master, slave = PTY.open
   slave.winsize = [24, 80]
   original = IO.popen(['stty', '-g'], in: slave, &:read)
-  pid = Process.spawn({'HOME'=>home}, RUNTIME, '42 see quit . cr quit', in: slave, out: slave, err: slave)
+  pid = Process.spawn({'HOME'=>home}, RUNTIME, '42 see quit . cr quit', in: slave, out: slave, err: slave, chdir: home)
   begin
     first = screen(receive(master, PROMPT), 24)
     raise 'Missing metadata' unless first.include?('quit') && first.include?('image 0x')

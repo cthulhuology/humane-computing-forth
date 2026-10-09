@@ -6,6 +6,7 @@ work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 export HOME="$work"
 ${CC:-cc} -shared -fPIC -O2 -Wall -Wextra -o "$work/fixture.so" selfhost/fixture-ffi.c
+cd "$work"
 cat > "$work/check.f" <<FORTH
 variable library.handle
 variable library.again
