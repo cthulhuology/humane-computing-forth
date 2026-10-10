@@ -3063,6 +3063,24 @@ code stacks.reset
   ret,
 code.end
 
+\ Print the data stack from bottom to top with a depth header.
+: .S ( -- )
+  depth s" <" type dup u. s" > " type space
+  context data.stack.offset + swap
+  begin dup 0 > while 1- swap dup @ . 8 + swap repeat 2drop ;
+
+\ Print the Forth return stack from bottom to top with a depth header.
+: .RS ( -- )
+  rdepth s" <" type dup u. s" > " type space
+  context return.stack.offset + swap
+  begin dup 0 > while 1- swap dup @ . 8 + swap repeat 2drop ;
+
+\ Print the current data stack depth.
+: .depth ( -- ) depth . ;
+
+\ Print the current Forth return stack depth.
+: .rdepth ( -- ) rdepth . ;
+
 \ Abandon the current protected input and return to its caller with empty stacks.
 \ The outer input loop observes the request and reads a fresh line. A debugger
 \ can also QUIT: its own boundary returns without unwinding the parent context.
@@ -5636,6 +5654,12 @@ variable ffi.descriptor.hole
 : fconstant ( F: value -- )
   3 entry.open f>bits dup entry.value entry.field ! asm.literal
   s" bits>f" target.xt asm.call asm.ret entry.finish ; immediate
+
+\ Print the floating-point stack from bottom to top with a depth header.
+: .FS ( -- )
+  fdepth s" <" type dup u. s" > " type space
+  context float.stack.offset + swap
+  begin dup 0 > while 1- swap dup @ bits>f f. 8 + swap repeat 2drop ;
 
 unit.end
 
