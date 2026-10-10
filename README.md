@@ -47,3 +47,7 @@ To see all the words in the system you can use the "words" browser to navigate. 
 
 ![ words ](words.png)
 
+The system also has an interactive debugger where you can walk through stack traces and view the code
+that was being executed.  For example the command "./forth debug.on trap" will generate the following:
+
+![ debug.on trap ](trap.png)
