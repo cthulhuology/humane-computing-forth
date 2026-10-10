@@ -14,40 +14,117 @@ are aligned with the https://humanecomputing.org manifesto.
 
 h.c.forth is written from scratch in forth and initially bootstrapped from
 SwiftForth using a small cross compiling shim.f which generated the initial
-binary.  Unlike most programming environment, h.c.forth embeds it's full 
-source in the executable itself, and by verifies it can reproduce it's own
-build from it's own source.  You can check for yourself by running:
+binary.  Unlike most programming environments, h.c.forth embeds its full
+source in the executable itself, and verifies it can reproduce its own build
+from its own source.
 
-    ./forth verify
+## Getting Started
 
-The above command tells h.c.forth to run the word verify.  You can see the
-implementation of this word using:
+### Prerequisites
 
-    ./forth see verify 
+* Linux x86-64
+* glibc (`libc.so.6`, `libdl.so.2`) at runtime
+* A native seed executable at `selfhost/seed/forth` (retained in the repo)
+* GNU make, and a C compiler only for the FFI test library (`make test`)
 
-This will generate the following text:
+### Build
+
+```sh
+make
+```
+
+The seed binary at `selfhost/seed/forth` reads `forth.f`, compiles a first
+candidate, then that candidate recompiles itself and compares both outputs
+byte-for-byte.  The final `./forth` executable is installed only after the
+triple self-compilation check passes.  Build artifacts land in `selfhost/build/`.
+
+Other make targets:
+
+```sh
+make verify      # run the built-in self-test suite
+make test        # build + regression tests + source-load checks
+make seed        # promote the current ./forth as the new retained seed
+make clean       # remove build outputs (the seed is never removed)
+```
+
+### Run
+
+Pass Forth words directly on the command line:
+
+```sh
+./forth 1 2 + .              # prints 3
+./forth '9 dup * . cr'       # prints 81
+./forth verify               # self-compilation check; prints pass/fail
+```
+
+With no arguments, `./forth` opens an interactive line loop.  History is saved
+to `$HOME/.forth`.  On a terminal, Up/Down recalls previous lines, Ctrl-U
+clears the current line, and Ctrl-D exits.
+
+```sh
+$ ./forth
+: sq dup * ;
+9 sq .                       \ prints 81
+bye
+```
+
+### Load a source file
+
+```sh
+./forth build.file forth.f /tmp/out    # compile forth.f into /tmp/out/
+source.load hello.f                    # inside the REPL: append and compile
+```
+
+### Snapshots
+
+Save and restore the running system:
+
+```forth
+snapshot Initial working version
+snapshots                              \ browse revisions
+restore native.snapshots/00000000
+undo
+```
+
+### Introspection commands
+
+`see`, `locate`, `where`, and `words` all work on the live dictionary without
+any external source file.
+
+**`see name`** — disassembles a word: hex dump, Intel x86-64 disassembly, and
+the original source text.
+
+    ./forth see verify
 
 ![ see verify ](verify.png)
 
-The word "see" dumps a full machine code & source trace displaying where the code is in memory, 
-dumps the content of memory for the machine code segment, disassembles the machine code to 
-Intel assembler dereferencing for words, and displaying the source code that generated that code. 
+**`locate name`** — shows the definition in context with its neighbouring
+source entries.
 
-You can find the source code to a word incontext using "locate" for example "locate verify?" will
-display:
+    ./forth locate verify?
 
 ![ locate ?verify ](locate.png)
 
-To find all the locations a word is refrenced in the system you can use the command "where" to
-find them.  For example "where verify?" will display the following interface:
+**`where name`** — lists every occurrence of a word across the entire embedded
+source, with the containing definition and source offset for each hit.
+
+    ./forth where verify?
 
 ![ where ?verify ](where.png)
 
-To see all the words in the system you can use the "words" browser to navigate.  It also supports search!
+**`words`** — a full-screen browser of all dictionary entries.  Type `/text`
+then Enter to search; `n` finds the next match; Enter or Right opens `see`.
 
 ![ words ](words.png)
 
-The system also has an interactive debugger where you can walk through stack traces and view the code
-that was being executed.  For example the command "./forth debug.on trap" will generate the following:
+### Debugger
+
+`debug.on` installs a post-fault hook that prints registers, data and return
+stacks, and the source window around the faulting instruction.  On a terminal,
+arrow keys navigate the native call stack.
+
+    ./forth debug.on trap
 
 ![ debug.on trap ](trap.png)
+
+`debug.off` clears the hook.
