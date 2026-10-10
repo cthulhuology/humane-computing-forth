@@ -554,7 +554,6 @@ code.end
 204800  constant return.guard.offset
 
 \ default stack allocation 
-
 \ Usable byte capacity of each guarded stack.
 65536   constant stack.size
 
@@ -584,16 +583,16 @@ $31464c4553465446 constant image.magic
 3                 constant image.version
 
 \ Reserved byte capacity of each independently compiled image.
-1048576           constant image.capacity
+25169920          constant image.capacity
 
 \ Image-relative offset of the first executable code byte.
 4096              constant code.start
 
 \ Image-relative offset of the first dictionary record.
-262144            constant dictionary.start
+10489856          constant dictionary.start
 
 \ Image-relative offset of the retained source text.
-393216            constant source.start
+12587008          constant source.start
 
 \ dictionary entry size
 
@@ -943,8 +942,6 @@ $5402   constant terminal.set
 \ Linux TIOCGWINSZ request for reading terminal rows and columns.
 $5413   constant terminal.window
 
-\ Linux x86-64 syscall number for ioctl.
-16      constant syscall.ioctl
 
 \ ICANON flag selecting canonical line input.
 2       constant terminal.canonical
@@ -1101,8 +1098,44 @@ $08000000 constant signal.flag.onstack
 \ Base exit status added to a signal number for fault termination.
 128     constant process.signal.exit
 
+\ sys_read
+0       constant syscall.read
+
+\ sys_write
+1       constant syscall.write
+
+\ Linux x86-64 syscall number for open.
+2       constant syscall.open
+
+\ sys_close
+3       constant syscall.close
+
+\ sys_mmap
+9       constant syscall.mmap
+
+\ sys_mprotect
+10      constant syscall.mprotect
+
+\ sys_munmap
+11      constant syscall.munmap
+
+\ Linux x86-64 syscall number for rt_sigaction.
+13      constant syscall.sigaction
+
+\ Linux x86-64 syscall number for rt_sigreturn.
+15      constant syscall.sigreturn
+
+\ Linux x86-64 syscall number for ioctl.
+16      constant syscall.ioctl
+
 \ Linux x86-64 syscall number for getpid.
 39      constant syscall.getpid
+
+\ sys_execve
+59      constant syscall.execve
+
+\ sys_exit
+60      constant syscall.exit
 
 \ Linux x86-64 syscall number for fork.
 57      constant syscall.fork
@@ -1113,25 +1146,29 @@ $08000000 constant signal.flag.onstack
 \ Linux x86-64 syscall number for kill.
 62      constant syscall.kill
 
-\ Linux x86-64 syscall number for memfd_create.
-319     constant syscall.memfd
+\ Linux x86-64 syscall number for fsync.
+74      constant syscall.fsync
 
-\ Linux x86-64 syscall number for rt_sigaction.
-13      constant syscall.sigaction
+\ Linux syscall for obtaining the absolute working directory.
+79      constant syscall.getcwd
 
-\ Linux x86-64 syscall number for rt_sigreturn.
-15      constant syscall.sigreturn
+\ sys_mkdir
+83      constant syscall.mkdir
+
+\ sys_unlink
+87      constant syscall.unlink
 
 \ Linux x86-64 syscall number for sigaltstack.
 131     constant syscall.sigaltstack
 
-\ Linux file operations and flags used by the persistent input history.
+\ Linux syscall for enumerating directory entries in their 64-bit layout.
+217     constant syscall.getdents
 
-\ Linux x86-64 syscall number for open.
-2       constant syscall.open
+\ Linux syscall for creating an anonymous executable file.
+319     constant syscall.memfd
 
-\ Linux x86-64 syscall number for fsync.
-74      constant syscall.fsync
+\ Linux syscall for executing an open file descriptor.
+322     constant syscall.execveat
 
 \ History open flags: read/write, create if absent and append writes.
 525378  constant history.open.flags     \ O_RDWR | O_CREAT | O_APPEND | O_CLOEXEC.
@@ -1141,6 +1178,8 @@ $08000000 constant signal.flag.onstack
 
 \ Negative EINTR result requiring an interrupted syscall retry.
 -4      constant syscall.interrupted
+
+\ Linux x86-64 syscall numbers for calls made with literal numbers in the source.
 
 \ Native disassembler operand forms and architectural instruction-size limit.
 
@@ -1385,6 +1424,75 @@ variable compare.length
 \ Terminate through libc so buffered output and library destructors are processed.
 : process.exit loader.exit loader.function c.call1 drop ;
 
+\ Read bytes from a file descriptor into a buffer.
+: read ( fd address length -- result ) 0 0 0 syscall.read syscall6 ;
+
+\ Write bytes from a buffer to a file descriptor.
+: write ( fd address length -- result ) 0 0 0 syscall.write syscall6 ;
+
+\ Release a file descriptor.
+: close ( fd -- result ) 0 0 0 0 0 syscall.close syscall6 ;
+
+\ Open a file by pathname, returning a file descriptor.
+: open ( pathname flags mode -- result ) 0 0 0 syscall.open syscall6 ;
+
+\ Map a file or anonymous memory range into the address space.
+: mmap ( address length protection flags fd offset -- result ) syscall.mmap syscall6 ;
+
+\ Change the access protection of a mapped memory region.
+: mprotect ( address length protection -- result ) 0 0 0 syscall.mprotect syscall6 ;
+
+\ Unmap a previously mapped memory region.
+: munmap ( address length -- result ) 0 0 0 0 syscall.munmap syscall6 ;
+
+\ Return the process identifier of the calling process.
+: getpid ( -- result ) 0 0 0 0 0 0 syscall.getpid syscall6 ;
+
+\ Fork the process, returning the child pid in the parent and zero in the child.
+: fork ( -- result ) 0 0 0 0 0 0 syscall.fork syscall6 ;
+
+\ Wait for a child process to change state, storing its status.
+: wait4 ( pid status-address -- result ) 0 0 0 0 syscall.wait syscall6 ;
+
+\ Send a signal to a process identified by pid.
+: kill ( pid signal -- result ) 0 0 0 0 syscall.kill syscall6 ;
+
+\ Replace the current process image with the named executable.
+: execve ( pathname argv envp -- result ) 0 0 0 syscall.execve syscall6 ;
+
+\ Execute an open file descriptor as a process image.
+: execveat ( dirfd pathname argv envp flags -- result ) 0 syscall.execveat syscall6 ;
+
+\ Terminate the calling process with the given exit status.
+: exit ( status -- ) 0 0 0 0 0 syscall.exit syscall6 drop ;
+
+\ Create a directory at the given path with the supplied permission bits.
+: sys.mkdir ( pathname mode -- result ) 0 0 0 0 syscall.mkdir syscall6 ;
+
+\ Remove a file from the filesystem by pathname.
+: unlink ( pathname -- result ) 0 0 0 0 0 syscall.unlink syscall6 ;
+
+\ Flush a file descriptor's buffered data to the underlying storage.
+: fsync ( fd -- result ) 0 0 0 0 0 syscall.fsync syscall6 ;
+
+\ Issue a device-control request on a file descriptor.
+: ioctl ( fd request argument -- result ) 0 0 0 syscall.ioctl syscall6 ;
+
+\ Install or query a signal action for the given signal number.
+: sigaction ( signum action oldact size -- result ) 0 0 syscall.sigaction syscall6 ;
+
+\ Set or query the alternate signal stack.
+: sigaltstack ( ss old-ss -- result ) 0 0 0 0 syscall.sigaltstack syscall6 ;
+
+\ Create an anonymous file backed by memory, returning a file descriptor.
+: memfd ( name flags -- result ) 0 0 0 0 syscall.memfd syscall6 ;
+
+\ Return the current working directory path into a buffer.
+: getcwd ( buffer size -- result ) 0 0 0 0 syscall.getcwd syscall6 ;
+
+\ Read directory entries from an open directory file descriptor.
+: getdents ( fd dirp count -- result ) 0 0 0 syscall.getdents syscall6 ;
+
 \ Optional image-relative stdout capture handler, returning the written byte count.
 variable output.capture
 
@@ -1394,7 +1502,7 @@ variable output.capture.image
 \ Write a byte range to standard output and return the system-call result.
 : stdout.write ( addr length -- result )
   output.capture @ dup if output.capture.image @ swap image.call ; then drop
-  1 -rot 0 0 0 1 syscall6 ;
+  1 -rot write ;
 
 \ Optional image-relative text-output handler; zero selects ordinary stdout.
 variable output.vector
@@ -1440,13 +1548,13 @@ variable output.image
 : c.string ( address length -- zstring )
   dup 0 >= require dup image.capacity < require
   dup cell+ 1+ page.align >r
-  0 r@ protection.read.write 34 -1 0 9 syscall6 dup 0 > require
+  0 r@ protection.read.write 34 -1 0 mmap dup 0 > require
   r> over ! cell+ >r
   r@ over + 0 swap c! r@ swap move r> ;
 
 \ Release an owned C string using the allocation size immediately before it.
 : c.string.free ( zstring -- )
-  8 - dup @ 0 0 0 0 11 syscall6 0= require ;
+  8 - dup @ munmap 0= require ;
 
 \ Return the length of a borrowed NUL-terminated C string; NULL gives zero length.
 : c.string.length ( zstring -- length )
@@ -2359,14 +2467,14 @@ variable assembler.test.buffer
 
 \ Allocate writable memory for a candidate image.
 : image.new ( -- address )
-  0 image.capacity protection.read.write 34 -1 0 9 syscall6 dup 0 > require ;
+  0 image.capacity protection.read.write 34 -1 0 mmap dup 0 > require ;
 
 \ Unmap an image's reserved memory range.
-: image.free ( address -- ) image.capacity 0 0 0 0 11 syscall6 0= require ;
+: image.free ( address -- ) image.capacity munmap 0= require ;
 
 \ Apply native memory protection to an address range.
 : image.protect ( address length protection -- )
-  0 0 0 10 syscall6 0= require ;
+  mprotect 0= require ;
 
 \ Make image metadata read-only and compiled code readable and executable.
 : image.seal ( image -- )
@@ -2384,8 +2492,10 @@ variable assembler.test.buffer
   dup header.image.size + @ bytes.equal? ;
 
 \ Compile the executing image's mapped source into a new image.
+\ Use the header's recorded source offset rather than the source.start constant so
+\ that a bootstrap built with an older seed layout still finds its source correctly.
 : rebuild ( -- candidate-image )
-  image.new >r org source.start + org header.source.length + @ r@ image.build r> ;
+  image.new >r org org header.source.offset + @ + org header.source.length + @ r@ image.build r> ;
 
 \ Silently rebuild, compare with the executing image, and release the candidate.
 : verify? ( -- flag ) rebuild dup >r org image.equal? r> image.free ;
@@ -2560,7 +2670,7 @@ code.end
 
 \ Register the prepared kernel sigaction for one signal.
 : signal.install ( signal -- )
-  context signal.action.offset + 0 signal.mask.size 0 0 syscall.sigaction syscall6 0= require ;
+  context signal.action.offset + 0 signal.mask.size sigaction 0= require ;
 
 \ Install the alternate stack and minimal handlers for faults, traps and Ctrl-C.
 \ The restorer and handler belong to the installed image, which must stay mapped.
@@ -2568,7 +2678,7 @@ code.end
   context signal.stack.offset + context signal.alt.offset + alt.base + !
   0 context signal.alt.offset + alt.flags + !
   stack.size context signal.alt.offset + alt.size + !
-  context signal.alt.offset + 0 0 0 0 0 syscall.sigaltstack syscall6 0= require
+  context signal.alt.offset + 0 sigaltstack 0= require
   s" signal.handle" compiler.xt org + context signal.action.offset + action.handler + !
   signal.flag.info signal.flag.restorer or signal.flag.onstack or
   context signal.action.offset + action.flags + !
@@ -2734,20 +2844,20 @@ code.end
 : test.bus.prepare
   context context.scratch + 32 erase
   s" forth-signal-test" context context.scratch + swap move
-  context context.scratch + 0 0 0 0 0 syscall.memfd syscall6
+  context context.scratch + 0 memfd
   dup 0 >= require test.bus.fd !
-  0 page.size protection.read 2 test.bus.fd @ 0 9 syscall6
+  0 page.size protection.read 2 test.bus.fd @ 0 mmap
   dup 0 > require test.bus.mapping ! ;
 
 \ Release the SIGBUS fixture after returning through the recovery boundary.
 : test.bus.release
-  test.bus.mapping @ page.size 0 0 0 0 11 syscall6 0= require
-  test.bus.fd @ 0 0 0 0 0 3 syscall6 0= require ;
+  test.bus.mapping @ page.size munmap 0= require
+  test.bus.fd @ close 0= require ;
 
 \ Deliver SIGINT to this process to exercise the future REPL interrupt boundary.
 : test.fault.interrupt
-  0 0 0 0 0 0 syscall.getpid syscall6
-  signal.interrupt 0 0 0 0 syscall.kill syscall6 drop ;
+  getpid
+  signal.interrupt kill drop ;
 
 \ Enter another sealed image and fault before image.call can restore the origin.
 : test.fault.foreign
@@ -2763,7 +2873,7 @@ code.end
 : test.signal.stack
   context signal.stack.field + @
   context signal.stack.offset + context signal.guard.offset + within require
-  0 context signal.alt.offset + 0 0 0 0 syscall.sigaltstack syscall6 0= require
+  0 context signal.alt.offset + sigaltstack 0= require
   context signal.alt.offset + alt.flags + @ 0= require ;
 
 \ Check that recovery restores the caller's origin and retains the faulting origin.
@@ -2801,10 +2911,10 @@ code.end
 
 \ Confirm an unarmed fault terminates only a disposable child with 128+signal.
 : test.signal.fatal
-  0 0 0 0 0 0 syscall.fork syscall6 dup 0 >= require
+  fork dup 0 >= require
   dup 0= if drop test.fault.illegal 1 process.exit then
   0 context context.scratch + !
-  context context.scratch + 0 0 0 0 syscall.wait syscall6 0 > require
+  context context.scratch + wait4 0 > require
   context context.scratch + @ process.signal.exit signal.illegal + 8 lshift = require ;
 
 \ Exercise real faults, repeated traps, complete rollback and all guarded stacks.
@@ -3090,16 +3200,16 @@ variable pager.length
 : pager.release
   0 output.capture ! 0 output.capture.image !
   pager.address @ if
-    pager.address @ pager.capacity @ 0 0 0 0 11 syscall6 drop
+    pager.address @ pager.capacity @ munmap drop
   then 0 pager.address ! 0 pager.capacity ! 0 pager.length ! ;
 
 \ Grow the captured-output mapping without changing its existing bytes.
 : pager.grow
   pager.capacity @ dup 0= if drop page.size else 2 * then >r
-  0 r@ protection.read.write 34 -1 0 9 syscall6 dup 0 > require
+  0 r@ protection.read.write 34 -1 0 mmap dup 0 > require
   pager.address @ if
     dup >r pager.address @ r@ pager.length @ move
-    pager.address @ pager.capacity @ 0 0 0 0 11 syscall6 drop r> drop
+    pager.address @ pager.capacity @ munmap drop r> drop
   then pager.address ! r> pager.capacity ! ;
 
 \ Capture a complete stdout byte range and report it as successfully written.
@@ -3147,7 +3257,7 @@ variable pager.length
 \ Detect terminal output and derive a bounded frame width from its current size.
 : tui.measure
   0 tui.size !
-  1 terminal.window tui.size 0 0 0 syscall.ioctl syscall6 0= tui.terminal !
+  1 terminal.window tui.size ioctl 0= tui.terminal !
   tui.terminal @ if tui.size @ 16 rshift 65535 and else 80 then
   dup 8 < if drop 80 then 240 min 4 - tui.width ! ;
 
@@ -3258,7 +3368,7 @@ variable where.history
 : where.history.free
   begin where.history @ dup while
     dup where.saved.previous + @ where.history !
-    page.size 0 0 0 0 11 syscall6 drop
+    page.size munmap drop
   repeat drop ;
 
 \ Abandon interrupted frame output and restore terminal attributes after recovery.
@@ -3287,7 +3397,7 @@ variable where.history
 \ Invoke the optional hook after sigreturn, preserving the original fault record.
 : debug.dispatch
   DEBUG @ 0= if ; then
-  0 context.mapping.size protection.read.write 34 -1 0 9 syscall6
+  0 context.mapping.size protection.read.write 34 -1 0 mmap
   dup 0 > require debug.context !
   context debug.context @ debug.parent.field + !
   context loader.table.field + @ debug.context @ loader.table.field + !
@@ -3299,10 +3409,10 @@ variable where.history
   DEBUG @ debug.context @ debug.xt.field + !
   debug.context @ debug.enter debug.status !
   debug.context @ debug.terminal.active + @ if
-    0 terminal.set debug.context @ debug.terminal.saved + 0 0 0 syscall.ioctl syscall6 0= require
+    0 terminal.set debug.context @ debug.terminal.saved + ioctl 0= require
   then
   signals.install
-  debug.context @ context.mapping.size 0 0 0 0 11 syscall6 0= require
+  debug.context @ context.mapping.size munmap 0= require
   debug.status @ if
     s" Debug hook fault: signal " type debug.status @ . cr
   then ;
@@ -3550,27 +3660,27 @@ variable source.window.cursor
 
 \ Save terminal settings and enable timed single-character input only on a real TTY.
 : debug.terminal.open ( -- flag )
-  0 terminal.get context debug.terminal.saved + 0 0 0 syscall.ioctl syscall6 if 0 ; then
-  1 terminal.get context debug.terminal.work + 0 0 0 syscall.ioctl syscall6 if 0 ; then
+  0 terminal.get context debug.terminal.saved + ioctl if 0 ; then
+  1 terminal.get context debug.terminal.work + ioctl if 0 ; then
   context debug.terminal.saved + context debug.terminal.work + /terminal move
   context debug.terminal.work + terminal.flags + dup c@
   terminal.canonical terminal.echo or terminal.echo.newline or -1 xor and swap c!
   0 context debug.terminal.work + terminal.minimum + c!
   1 context debug.terminal.work + terminal.time + c!
   1 context debug.terminal.active + !
-  0 terminal.set context debug.terminal.work + 0 0 0 syscall.ioctl syscall6 if 0 ; then
+  0 terminal.set context debug.terminal.work + ioctl if 0 ; then
   -1 ;
 
 \ Restore terminal settings after ordinary navigation or a direct dump invocation.
 : debug.terminal.close
   context debug.terminal.active + @ if
-    0 terminal.set context debug.terminal.saved + 0 0 0 syscall.ioctl syscall6 0= require
+    0 terminal.set context debug.terminal.saved + ioctl 0= require
     0 context debug.terminal.active + !
   then ;
 
 \ Read a terminal byte, returning minus one on timeout or EOF.
 : debug.key
-  0 context context.scratch + 1 0 0 0 0 syscall6
+  0 context context.scratch + 1 read
   dup 0 < if drop -2 ; then
   1 = if
     context context.scratch + c@ ;
@@ -3655,7 +3765,7 @@ variable arguments.remaining
     arguments.next
   repeat
   input.length @ 1+ page.align dup input.capacity !
-  0 swap protection.read.write 34 -1 0 9 syscall6 dup 0 > require input.address !
+  0 swap protection.read.write 34 -1 0 mmap dup 0 > require input.address !
   0 input.position ! arguments.reset
   begin arguments.remaining @ while
     arguments.cursor @ @ dup string.length
@@ -3712,7 +3822,13 @@ variable input.resume
   0 editor.stage ! 0 editor.ready ! 0 entry.current ! 0 control.depth ! ;
 
 \ Return an interactive compiler error to QUIT rather than terminating the runtime.
-: editor.fail s" Compilation error: " input.error ;
+: editor.fail
+  entry.current @ if
+    s" Compilation error in '" type
+    entry.name.offset entry.field @ build.base @ +
+    entry.name.length entry.field @
+    type s" ': " input.error
+  else s" Compilation error: " input.error then ;
 
 \ Preserve installed compiler syntax so the retained source remains bootstrappable.
 : editor.name
@@ -3821,10 +3937,10 @@ variable input.eof
 
 \ Grow the transient input buffer while preserving accumulated bytes.
 : input.grow
-  0 input.capacity @ 2 * protection.read.write 34 -1 0 9 syscall6
+  0 input.capacity @ 2 * protection.read.write 34 -1 0 mmap
   dup 0 > require >r
   input.address @ r@ input.length @ move
-  input.address @ input.capacity @ 0 0 0 0 11 syscall6 0= require
+  input.address @ input.capacity @ munmap 0= require
   r> input.address ! input.capacity @ 2 * input.capacity ! ;
 
 \ Read one line from stdin; EOF still permits execution of a final partial line.
@@ -3832,7 +3948,7 @@ variable input.eof
   0 input.length ! 0 input.position !
   begin
     input.length @ 1+ input.capacity @ >= if input.grow then
-    0 input.address @ input.length @ + 1 0 0 0 0 syscall6
+    0 input.address @ input.length @ + 1 read
     dup 0 < if drop s" Input read failed." type cr 2 process.exit then
     0= if 1 input.eof ! ; then
     input.address @ input.length @ + c@ 10 = if ; then
@@ -3880,7 +3996,7 @@ variable input.terminal
 \ Append a complete byte range, retrying interrupted and short writes.
 : history.write ( address length -- )
   begin dup while
-    2dup history.fd @ -rot 0 0 0 1 syscall6
+    2dup history.fd @ -rot write
     dup syscall.interrupted = if drop else
       dup 0 <= if history.fail then
       >r swap r@ + swap r> -
@@ -3889,16 +4005,16 @@ variable input.terminal
 
 \ Flush recorded commands before permitting their execution.
 : history.sync
-  begin history.fd @ 0 0 0 0 0 syscall.fsync syscall6
+  begin history.fd @ fsync
     dup syscall.interrupted <> if 0<> if history.fail then ; then drop
   again ;
 
 \ Double the recall buffer while preserving all retained source lines.
 : history.grow
-  0 history.capacity @ 2 * protection.read.write 34 -1 0 9 syscall6
+  0 history.capacity @ 2 * protection.read.write 34 -1 0 mmap
   dup 0 <= if history.fail then >r
   history.address @ r@ history.length @ move
-  history.address @ history.capacity @ 0 0 0 0 11 syscall6 drop
+  history.address @ history.capacity @ munmap drop
   r> history.address ! history.capacity @ 2 * history.capacity ! ;
 
 \ Find HOME in the original Linux environment without consulting another image.
@@ -3917,21 +4033,21 @@ variable input.terminal
 : history.open
   history.ready @ if ; then
   history.home dup 9 + page.align >r
-  0 r@ protection.read.write 34 -1 0 9 syscall6
+  0 r@ protection.read.write 34 -1 0 mmap
   dup 0 <= if history.fail then
   >r 2dup r@ swap move nip
   r@ + s" /.forth" rot swap move
   \ Anonymous mappings supply the trailing zero after the pathname.
-  r@ history.open.flags history.permissions 0 0 0 syscall.open syscall6
+  r@ history.open.flags history.permissions open
   dup 0 < if history.fail then history.fd !
-  r> r> 0 0 0 0 11 syscall6 drop
+  r> r> munmap drop
   page.size history.capacity !
-  0 page.size protection.read.write 34 -1 0 9 syscall6
+  0 page.size protection.read.write 34 -1 0 mmap
   dup 0 <= if history.fail then history.address !
   begin
     history.length @ history.capacity @ = if history.grow then
     history.fd @ history.address @ history.length @ +
-    history.capacity @ history.length @ - 0 0 0 0 syscall6
+    history.capacity @ history.length @ - read
     dup syscall.interrupted = if drop else
       dup 0 < if history.fail then
       dup 0= if drop
@@ -3959,7 +4075,7 @@ variable input.terminal
 \ Release the saved draft after accepting or abandoning terminal input.
 : history.draft.free
   history.draft @ if
-    history.draft @ history.draft.capacity @ 0 0 0 0 11 syscall6 drop
+    history.draft @ history.draft.capacity @ munmap drop
     0 history.draft !
   then ;
 
@@ -3967,7 +4083,7 @@ variable input.terminal
 : history.draft.save
   history.draft.free input.length @ history.draft.length !
   input.length @ 1+ page.align dup history.draft.capacity !
-  0 swap protection.read.write 34 -1 0 9 syscall6
+  0 swap protection.read.write 34 -1 0 mmap
   dup 0 <= if history.fail then history.draft !
   input.address @ history.draft @ input.length @ move ;
 
@@ -4336,7 +4452,7 @@ variable where.remaining
 
 \ Save the current query and exact list position before following a definition.
 : where.history.push
-  0 page.size protection.read.write 34 -1 0 9 syscall6 dup 0 > require >r
+  0 page.size protection.read.write 34 -1 0 mmap dup 0 > require >r
   where.history @ r@ where.saved.previous + !
   inspect.name @ r@ where.saved.name + !
   inspect.length @ r@ where.saved.length + !
@@ -4365,7 +4481,7 @@ variable where.remaining
   r@ where.saved.first + @ where.first !
   r@ where.saved.image + @ debug.owner !
   r@ where.saved.previous + @ where.history !
-  r> page.size 0 0 0 0 11 syscall6 drop where.scan ;
+  r> page.size munmap drop where.scan ;
 
 \ Apply an occurrence-navigation arrow, then redraw the bounded view.
 : where.arrow ( key -- )
@@ -5556,23 +5672,11 @@ $2050414e53485446 constant snapshot.magic
 \ Maximum patch allocation: twice image.capacity, including span overhead.
 2097152 constant patch.capacity
 
-\ Linux syscall for obtaining the absolute working directory.
-79      constant syscall.getcwd
-
-\ Linux syscall for creating an anonymous executable file.
-319     constant syscall.memfd
-
-\ Linux syscall for executing an open file descriptor.
-322     constant syscall.execveat
-
 \ Close the anonymous executable descriptor after a successful exec.
 1       constant memfd.cloexec
 
 \ Resolve an empty exec pathname through the supplied descriptor.
 4096    constant execveat.empty.path
-
-\ Linux syscall for enumerating directory entries in their 64-bit layout.
-217     constant syscall.getdents
 
 \ Offset of the two-byte record length in a Linux dirent64.
 16      constant directory.length.offset
@@ -5737,12 +5841,12 @@ variable snapshots.index
 \ Allocate invocation-private path buffers and initialize descriptor state.
 : snapshot.init
   snapshot.buffers @ if ; then
-  0 page.size 9 * protection.read.write 34 -1 0 9 syscall6 dup 0 > require
+  0 page.size 9 * protection.read.write 34 -1 0 mmap dup 0 > require
   snapshot.buffers ! -1 snapshot.fd ! ;
 
 \ Close the active checkpoint descriptor, including after a failed operation.
 : snapshot.close
-  snapshot.fd @ 0 >= if snapshot.fd @ 0 0 0 0 0 3 syscall6 drop -1 snapshot.fd ! then ;
+  snapshot.fd @ 0 >= if snapshot.fd @ close drop -1 snapshot.fd ! then ;
 
 \ Abort a filesystem transaction while keeping the previously published image.
 : snapshot.fail
@@ -5764,18 +5868,18 @@ variable snapshots.index
 
 \ Create a private directory or accept an already existing directory.
 : snapshot.mkdir
-  snapshot.work 448 0 0 0 0 83 syscall6 dup -17 = if drop ; then snapshot.ok ;
+  snapshot.work 448 sys.mkdir dup -17 = if drop ; then snapshot.ok ;
 
 \ Open a new checkpoint file without overwriting any existing file.
 : snapshot.create ( mode -- )
-  snapshot.file snapshot.create.flags rot 0 0 0 syscall.open syscall6
+  snapshot.file snapshot.create.flags rot open
   dup 0 < if snapshot.fail then snapshot.fd ! ;
 
 \ Write every requested byte, retrying interrupted and partial writes.
 : snapshot.write ( address length -- )
   snapshot.io.length ! snapshot.io.address !
   begin snapshot.io.length @ while
-    snapshot.fd @ snapshot.io.address @ snapshot.io.length @ 0 0 0 1 syscall6
+    snapshot.fd @ snapshot.io.address @ snapshot.io.length @ write
     dup syscall.interrupted = if drop else
       dup 0 <= if drop snapshot.fail then
       dup snapshot.io.address +! negate snapshot.io.length +!
@@ -5784,28 +5888,28 @@ variable snapshots.index
 
 \ Flush a complete file before closing it.
 : snapshot.finish
-  snapshot.fd @ 0 0 0 0 0 syscall.fsync syscall6 snapshot.ok snapshot.close ;
+  snapshot.fd @ fsync snapshot.ok snapshot.close ;
 
 \ Flush the candidate directory so its file entries survive a crash.
 : snapshot.sync.directory
-  snapshot.work snapshot.directory.flags 0 0 0 0 syscall.open syscall6
+  snapshot.work snapshot.directory.flags 0 open
   dup 0 < if snapshot.fail then snapshot.fd ! snapshot.finish ;
 
 \ Read a file into the supplied buffer, rejecting oversized or short required data.
 : snapshot.read ( address capacity -- bytes )
   snapshot.io.length ! snapshot.io.address ! 0 snapshot.read.length !
-  snapshot.file 524288 0 0 0 0 syscall.open syscall6
+  snapshot.file 524288 0 open
   dup 0 < if snapshot.fail then snapshot.fd !
   begin snapshot.read.length @ snapshot.io.length @ < while
     snapshot.fd @ snapshot.io.address @ snapshot.read.length @ +
-    snapshot.io.length @ snapshot.read.length @ - 0 0 0 0 syscall6
+    snapshot.io.length @ snapshot.read.length @ - read
     dup syscall.interrupted = if drop else
       dup 0 < if snapshot.fail then
       dup 0= if drop snapshot.close snapshot.read.length @ ; then
       snapshot.read.length +!
     then
   repeat
-  begin snapshot.fd @ context context.scratch + 128 + 1 0 0 0 0 syscall6
+  begin snapshot.fd @ context context.scratch + 128 + 1 read
     dup syscall.interrupted <> until
   0= if snapshot.close snapshot.read.length @ ; then snapshot.fail ;
 
@@ -5833,8 +5937,8 @@ variable snapshots.index
 : snapshot.release
   snapshot.close
   snapshot.command @ if snapshot.command @ c.string.free 0 snapshot.command ! then
-  snapshot.memfd @ if snapshot.memfd @ 1- 0 0 0 0 0 3 syscall6 drop 0 snapshot.memfd ! then
-  snapshot.patch @ if snapshot.patch @ patch.capacity 0 0 0 0 11 syscall6 drop 0 snapshot.patch ! then
+  snapshot.memfd @ if snapshot.memfd @ 1- close drop 0 snapshot.memfd ! then
+  snapshot.patch @ if snapshot.patch @ patch.capacity munmap drop 0 snapshot.patch ! then
   snapshot.chain @ if snapshot.chain @ image.free 0 snapshot.chain ! then
   snapshot.result @ if snapshot.result @ image.free 0 snapshot.result ! then
   snapshot.parent.image @ if snapshot.parent.image @ image.free 0 snapshot.parent.image ! then ;
@@ -5842,7 +5946,7 @@ variable snapshots.index
 \ Allocate reusable patch and revision-chain storage for a transaction.
 : snapshot.allocate
   snapshot.patch @ 0= if
-    0 patch.capacity protection.read.write 34 -1 0 9 syscall6
+    0 patch.capacity protection.read.write 34 -1 0 mmap
     dup 0 > snapshot.need snapshot.patch !
   then
   snapshot.chain @ 0= if image.new snapshot.chain ! then ;
@@ -5858,7 +5962,7 @@ variable snapshots.index
   dup 0 > over page.size 128 - < and snapshot.need
   dup >r snapshot.target swap move 0 snapshot.target r@ + c!
   snapshot.target c@ 47 = if snapshot.target r> snapshot.path! ; then
-  snapshot.work page.size 128 - 0 0 0 0 syscall.getcwd syscall6 dup 0 > snapshot.need
+  snapshot.work page.size 128 - getcwd dup 0 > snapshot.need
   1- snapshot.work.length !
   snapshot.work.length @ r@ + 2 + page.size 64 - < snapshot.need
   47 snapshot.work snapshot.work.length @ + c! 1 snapshot.work.length +!
@@ -5872,7 +5976,7 @@ variable snapshots.index
 
 \ Select CWD/CWD-NAME.snapshots, creating the project collection when necessary.
 : snapshot.project
-  snapshot.work page.size 2 / 0 0 0 0 syscall.getcwd syscall6 dup 0 > snapshot.need
+  snapshot.work page.size 2 / getcwd dup 0 > snapshot.need
   1- snapshot.work.length ! snapshot.work.length @ >r
   snapshot.work.length @ dup 1 = if
     drop s" root" snapshot.target swap move 4
@@ -5988,7 +6092,7 @@ variable snapshots.index
   begin
     snapshot.serial @ $ffffffff <= snapshot.need
     snapshot.serial @ snapshot.node
-    snapshot.work 448 0 0 0 0 83 syscall6 dup -17 = if
+    snapshot.work 448 sys.mkdir dup -17 = if
       drop 1 snapshot.serial +!
     else snapshot.ok snapshot.work snapshot.saved snapshot.work.length @ 1+ move ; then
   again ;
@@ -6198,7 +6302,13 @@ variable elf.assembler.cursor
   out.size elf.imports <= require
   r> >asm ;
 
+\ Set a segment's p_memsz independently of p_filesz to allow zero-fill beyond the file.
+: elf.extend ( memsz index -- )
+  elf.program.size * elf.header.size + 40 + elf! ;
+
 \ Generate a PIE adapter with a system interpreter, RELRO imports and W^X segments.
+\ The dict+source segment maps the full image.capacity so that a rebuilt image with a
+\ larger source.start offset is always addressable even during a bootstrap transition.
 : elf.build
   elf.header elf.image erase
   $00010102464c457f 0 elf!
@@ -6215,6 +6325,7 @@ variable elf.assembler.cursor
   1 5 elf.image code.start + snapshot.image @ header.code.limit + @ page.align code.start - page.size 6 elf.segment
   1 4 snapshot.image @ header.code.limit + @ page.align elf.image +
   snapshot.image @ header.image.size + @ snapshot.image @ header.code.limit + @ page.align - page.size 7 elf.segment
+  image.capacity snapshot.image @ header.code.limit + @ page.align - 7 elf.extend
   2 6 elf.dynamic elf.dynamic.count 16 * 8 8 elf.segment
   $6474e551 6 0 0 16 9 elf.segment
   $6474e552 4 elf.imports page.size 1 10 elf.segment
@@ -6231,13 +6342,13 @@ variable elf.assembler.cursor
   0 context context.scratch + 16 + ! 0 context context.scratch + 32 + !
   snapshot.memfd @ 1- context context.scratch + 32 + context context.scratch +
   context arguments.vector.field + @ context arguments.count.field + @ cells +
-  execveat.empty.path 0 syscall.execveat syscall6 ;
+  execveat.empty.path execveat ;
 
 \ Generate an anonymous ELF executable from the reconstructed canonical image.
 : snapshot.executable
   snapshot.image @ >r snapshot.result @ snapshot.image ! snapshot.elf
   0 context context.scratch + 32 + !
-  context context.scratch + 32 + memfd.cloexec 0 0 0 0 syscall.memfd syscall6
+  context context.scratch + 32 + memfd.cloexec memfd
   dup 0 >= snapshot.need dup 1+ snapshot.memfd ! snapshot.fd !
   snapshot.wrapper snapshot.wrapper.size snapshot.write
   snapshot.result @ snapshot.result.length @ snapshot.write
@@ -6247,12 +6358,12 @@ variable elf.assembler.cursor
 : snapshot.check
   snapshot.executable
   s" verify? 0= 2 and process.exit" c.string snapshot.command !
-  0 0 0 0 0 0 57 syscall6 dup 0 < if snapshot.fail then
+  fork dup 0 < if snapshot.fail then
   dup 0= if
-    drop 0 0 0 0 0 0 3 syscall6 drop
+    drop 0 close drop
     snapshot.memory.exec drop 2 process.exit
   then
-  >r begin r@ context context.scratch + 64 + 0 0 0 0 61 syscall6
+  >r begin r@ context context.scratch + 64 + wait4
     dup syscall.interrupted <> until
   r> = snapshot.need snapshot.command @ c.string.free 0 snapshot.command !
   context context.scratch + 64 + @ if s" Snapshot source verification failed: " input.error then ;
@@ -6348,7 +6459,7 @@ variable elf.assembler.cursor
   snapshot.file context context.scratch + ! 0 context context.scratch + 16 + !
   snapshot.file context context.scratch +
   context arguments.vector.field + @ context arguments.count.field + @ cells +
-  0 0 0 59 syscall6 ;
+  execve ;
 
 \ Verify and restore a reconstructed image with fresh variables, stacks and C handles.
 : snapshot.restore ( address length -- )
@@ -6360,15 +6471,15 @@ variable elf.assembler.cursor
 
 \ Release directory and browser storage after normal exit or input recovery.
 : snapshots.release
-  snapshots.fd @ if snapshots.fd @ 1- 0 0 0 0 0 3 syscall6 drop 0 snapshots.fd ! then
+  snapshots.fd @ if snapshots.fd @ 1- close drop 0 snapshots.fd ! then
   snapshots.entries @ if snapshots.entries @ image.free 0 snapshots.entries ! then
   snapshots.list @ if snapshots.list @ image.free 0 snapshots.list ! then ;
 
 \ Read a revision's commit marker; incomplete or inaccessible revisions are omitted.
 : snapshots.complete? ( -- flag )
   s" /complete" snapshot.filename
-  snapshot.file 524288 0 0 0 0 syscall.open syscall6 dup 0 < if drop 0 ; then
-  snapshot.fd ! snapshot.fd @ snapshot.wrapper 9 0 0 0 0 syscall6
+  snapshot.file 524288 0 open dup 0 < if drop 0 ; then
+  snapshot.fd ! snapshot.fd @ snapshot.wrapper 9 read
   8 = snapshot.wrapper @ snapshot.magic = and snapshot.close ;
 
 \ Decode exactly eight hexadecimal digits from a directory entry name.
@@ -6396,13 +6507,13 @@ variable elf.assembler.cursor
 : snapshots.scan
   snapshot.init snapshot.project image.new snapshots.entries ! image.new snapshots.list !
   0 snapshots.count !
-  snapshot.collection snapshot.directory.flags 0 0 0 0 syscall.open syscall6
+  snapshot.collection snapshot.directory.flags 0 open
   dup 0 >= snapshot.need 1+ snapshots.fd !
   begin
-    snapshots.fd @ 1- snapshots.entries @ page.size 0 0 0 syscall.getdents syscall6
+    snapshots.fd @ 1- snapshots.entries @ page.size getdents
     dup syscall.interrupted = if drop else
       dup 0 >= snapshot.need dup 0= if drop
-        snapshots.fd @ 1- 0 0 0 0 0 3 syscall6 drop 0 snapshots.fd ! ;
+        snapshots.fd @ 1- close drop 0 snapshots.fd ! ;
       then snapshots.bytes ! 0 snapshots.cursor !
       begin snapshots.cursor @ snapshots.bytes @ < while
         snapshots.bytes @ snapshots.cursor @ - directory.name.offset >= snapshot.need
@@ -6422,8 +6533,8 @@ variable elf.assembler.cursor
 \ Read a saved description, returning an empty string when none was supplied.
 : snapshots.comment ( -- address length )
   s" /comment" snapshot.filename
-  snapshot.file 524288 0 0 0 0 syscall.open syscall6 dup 0 < if drop snapshot.wrapper 0 ; then
-  snapshot.fd ! snapshot.fd @ snapshot.wrapper page.size 1- 0 0 0 0 syscall6
+  snapshot.file 524288 0 open dup 0 < if drop snapshot.wrapper 0 ; then
+  snapshot.fd ! snapshot.fd @ snapshot.wrapper page.size 1- read
   dup 0 >= snapshot.need snapshot.close snapshot.wrapper swap ;
 
 \ Print a single-line description with control characters rendered harmlessly.
@@ -6502,12 +6613,12 @@ variable build.candidate
 \ The executable path is in snapshot.file; the counted text becomes argv[1].
 : build.run ( address length -- )
   c.string snapshot.command !
-  0 0 0 0 0 0 57 syscall6 dup 0 < if snapshot.fail then
+  fork dup 0 < if snapshot.fail then
   dup 0= if
-    drop 0 0 0 0 0 0 3 syscall6 drop
-    -1 snapshot.exec drop 2 0 0 0 0 0 60 syscall6 drop ;
+    drop 0 close drop
+    -1 snapshot.exec drop 2 exit ;
   then
-  >r begin r@ context context.scratch + 64 + 0 0 0 0 61 syscall6
+  >r begin r@ context context.scratch + 64 + wait4
     dup syscall.interrupted <> until
   r> = require snapshot.command @ c.string.free 0 snapshot.command !
   context context.scratch + 64 + @ if
@@ -6555,7 +6666,7 @@ variable build.candidate
   s" build.finish " snapshot.wrapper swap move
   snapshot.work snapshot.wrapper 13 + snapshot.work.length @ move
   snapshot.wrapper snapshot.work.length @ 13 + build.run
-  s" /bootstrap" snapshot.filename snapshot.file 0 0 0 0 0 87 syscall6 snapshot.ok
+  s" /bootstrap" snapshot.filename snapshot.file unlink snapshot.ok
   snapshot.sync.directory
   build.candidate @ image.free build.source.buffer @ image.free
   s" Native file rebuild and executable verification passed." type cr ;
@@ -6817,7 +6928,7 @@ unit.end
     s" Unfinished compilation at end of input." type cr
     editor.cancel 2 input.status !
   then
-  input.address @ input.capacity @ 0 0 0 0 11 syscall6 0= require
+  input.address @ input.capacity @ munmap 0= require
   input.status @ process.exit ;
 
 \ Set a recognizable fault-time register value before entering the debugger.

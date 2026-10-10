@@ -12,7 +12,7 @@ forth: selfhost/build/forth
 selfhost/build/forth: forth.f $(SEED) | check-docs
 	@set -e; stage=$$(mktemp -d selfhost/.build.XXXXXX); \
 	trap 'rm -rf "$$stage"' EXIT; \
-	"$(abspath $(SEED))" build.file forth.f "$$stage" </dev/null; \
+	"$(abspath $(SEED))" debug.on build.file forth.f "$$stage" </dev/null; \
 	mkdir -p selfhost/build; \
 	for artifact in image.bin code.bin dictionary.bin source.bin forth; do \
 		mv -f "$$stage/$$artifact" "selfhost/build/$$artifact"; \
