@@ -100,7 +100,7 @@ require_text 'Disassembly (Intel):'
 require_text '-1 '
 
 # Encode each supported operand family in a never-executed CODE fixture.
-output=$("$runtime" 'code inspect.encoding r15 $1122334455667788 mov64, r8 r9 mov.rr, r10 rsp -128 load, r11 r12 128 store, r15 r13 0 lea, rax 0 rip.lea, r15 push, r14 pop, r15 execute, r14 jump.reg, r8 -7 add#, r9 7 sub#, r10 -1 cmp#, r11 255 and#, r8 r9 add.rr, r8 r9 sub.rr, r8 r9 and.rr, r8 r9 or.rr, r8 r9 xor.rr, r8 r9 cmp.rr, r8 r9 imul.rr, r15 r12 1 load8, r15 r12 1 store8, r15 r12 1 load.s32, r15 r12 1 store32, r8 negate, r9 divide, r10 multiply, r11 3 shift.right#, r12 shl.cl, r13 shr.cl, r15 cc.equal setcc, syscall, ud2, int3, cld, movsb, stosb, ret, code.end see inspect.encoding verify? .')
+output=$("$runtime" 'code inspect.encoding r15 $1122334455667788 mov64, r8 r9 mov.rr, r10 rsp -128 load, r11 r12 128 store, r15 r13 0 lea, rax 0 rip.lea, r15 push, r14 pop, r15 execute, r14 jump.reg, r8 -7 add#, r9 7 sub#, r10 -1 cmp#, r11 255 and#, r8 r9 add.rr, r8 r9 sub.rr, r8 r9 and.rr, r8 r9 or.rr, r8 r9 xor.rr, r8 r9 cmp.rr, r8 r9 imul.rr, r15 r12 1 load.u8, r15 r12 1 store8, r15 r12 1 load.s32, r15 r12 1 store32, r8 negate, r9 divide, r10 multiply, r11 3 shift.right#, r12 shl.cl, r13 shr.cl, r15 cc.equal setcc, syscall, ud2, int3, cld, movsb, stosb, ret, code.end see inspect.encoding verify? .')
 require_text 'mov r15, 0x1122334455667788'
 require_text 'mov r8, r9'
 require_text 'mov r10, qword ptr [rsp - 0x80]'

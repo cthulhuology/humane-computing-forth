@@ -227,7 +227,7 @@ code.end
 \ Fetch an unsigned byte from a native address.
 code c@
   rax rbp -8 load,
-  rax rax 0 load8,
+  rax rax 0 load.u8,
   rax rbp -8 store,
   ret,
 code.end
@@ -236,7 +236,7 @@ code.end
 code c!
   rax rbp -8 load,
   rdx rbp -16 load,
-  rdx rax 0 store8,
+  rdx rax 0 store.u8,
   rbp 16 sub#,
   ret,
 code.end
@@ -1774,12 +1774,28 @@ variable assembler.test.buffer
 \ Emit XOR of two registers.
 : xor.rr, ( dst src -- ) $31 alu.rr, ;
 
-\ Emit MOVZX from a memory byte into a 64-bit register.
-: load8, ( dst base displacement -- )
+\ Emit MOVZX from a memory byte into a 64-bit register (zero-extending).
+: load.u8, ( dst base displacement -- )
   >r 2dup rex, $0f byte, $b6 byte, r> mem, ;
 
+\ Emit MOVSX from a memory byte into a 64-bit register (sign-extending).
+: load.s8, ( dst base displacement -- )
+  >r 2dup rex, $0f byte, $be byte, r> mem, ;
+
 \ Emit MOV from a register's low byte into memory.
-: store8, ( src base displacement -- ) $88 memory.op, ;
+: store.u8, ( src base displacement -- ) $88 memory.op, ;
+
+\ Emit MOVZX from a memory word into a 64-bit register (zero-extending).
+: load.u16, ( dst base displacement -- )
+  >r 2dup rex, $0f byte, $b7 byte, r> mem, ;
+
+\ Emit MOVSX from a memory word into a 64-bit register (sign-extending).
+: load.s16, ( dst base displacement -- )
+  >r 2dup rex, $0f byte, $bf byte, r> mem, ;
+
+\ Emit MOV from a register's low word into memory.
+: store.u16, ( src base displacement -- )
+  $66 byte, >r 2dup rex32, $89 byte, r> mem, ;
 
 \ Emit a register operation selected by an F7 opcode extension.
 : unary, ( reg extension -- ) $f7 group, ;
@@ -1808,11 +1824,15 @@ variable assembler.test.buffer
 \ Emit CALL to a saved label.
 : invoke, ( id table -- ) label@ call, ;
 
+\ Emit MOV from a memory doubleword into a register (zero-extending to 64-bit).
+: load.u32, ( dst base displacement -- )
+  >r 2dup rex32, $8b byte, r> mem, ;
+
 \ Emit MOVSXD from a signed memory doubleword.
 : load.s32, ( dst base displacement -- ) $63 memory.op, ;
 
 \ Emit MOV from a register's low doubleword into memory.
-: store32, ( src base displacement -- )
+: store.u32, ( src base displacement -- )
   >r 2dup rex32, $89 byte, r> mem, ;
 
 \ Emit two-operand IMUL, storing the low product in the destination.
@@ -1992,7 +2012,7 @@ variable assembler.test.buffer
   assembler.test.buffer @ 2 + @ $ffffffff and 1 = require
   out.reset r12 r9 imul.rr,
   out.size 4 = require assembler.test.buffer @ @ $ffffffff and $e1af0f4d = require
-  out.reset r9 r12 0 store32,
+  out.reset r9 r12 0 store.u32,
   out.size 4 = require assembler.test.buffer @ @ $ffffffff and $240c8945 = require
   out.reset r12 cc.less setcc,
   out.size 4 = require assembler.test.buffer @ @ $ffffffff and $c49c0f49 = require
