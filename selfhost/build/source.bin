@@ -6291,7 +6291,7 @@ variable elf.assembler.cursor
 : checkpoint snapshot ;
 
 \ Return the rest of this input line as a pathname and consume it.
-: snapshot.path.parse ( -- address length )
+: path.parse ( -- address length )
   source.space.skip parser.source @ parser.position @ +
   parser.length @ parser.position @ - dup 0 > require
   parser.length @ dup parser.position ! input.position ! ;
@@ -6304,19 +6304,19 @@ variable elf.assembler.cursor
   editor.current header.source.length + @ snapshot.write snapshot.finish ;
 
 \ File out the source of the currently selected system to the following pathname.
-: source.save snapshot.path.parse source.write ;
+: source.save path.parse source.write ;
 
 \ Initialize project snapshot services without retaining runtime state from disk.
 : snapshot.boot snapshot.init ;
 
 \ Verify a committed snapshot using its own compiler without adopting it.
 : snapshot.verify
-  snapshot.path.parse snapshot.init 0 snapshot.pending ! snapshot.reconstruct
+  path.parse snapshot.init 0 snapshot.pending ! snapshot.reconstruct
   snapshot.check snapshot.release s" Snapshot verification passed." type cr ;
 
 \ Bind a restored image to its disk revision and enter the ordinary editor.
 : snapshot.enter
-  snapshot.path.parse 0 snapshot.pending ! snapshot.reconstruct
+  path.parse 0 snapshot.pending ! snapshot.reconstruct
   org snapshot.result @ image.equal? snapshot.need
   snapshot.work snapshot.current snapshot.work.length @ 1+ move
   snapshot.work.length @ snapshot.length ! snapshot.release quit ;
@@ -6516,7 +6516,7 @@ variable build.candidate
 \ Rebuild with the candidate compiler, generate its ELF and validate the result.
 \ Invoked in a fresh process so changed variable offsets never share the old context.
 : build.finish
-  snapshot.path.parse snapshot.path!
+  path.parse snapshot.path!
   rebuild dup build.candidate ! snapshot.image ! build.artifacts
   s" /forth" snapshot.filename s" selftest" build.run
   build.candidate @ image.free 0 process.exit ;
@@ -6545,10 +6545,10 @@ variable build.candidate
 : build.file
   editor.stage @ 0= require
   token.parse 0 > require token.address @ token.length @
-  snapshot.path.parse input.position @ input.resume ! build.source ;
+  path.parse input.position @ input.resume ! build.source ;
 
 \ Restore the following checkpoint directory; the rest of the line is its path.
-: restore snapshot.path.parse snapshot.restore ;
+: restore path.parse snapshot.restore ;
 
 \ Restore the parent checkpoint, preserving the abandoned branch on disk.
 : undo
@@ -6621,7 +6621,7 @@ unit.end
 
 \ Load and compile the following pathname, consuming the rest of the input line.
 : source.load
-  snapshot.path.parse input.position @ input.resume ! source.read ;
+  path.parse input.position @ input.resume ! source.read ;
 unit.end
 
 \ Display the current checkpoint path without entering an interactive browser.
