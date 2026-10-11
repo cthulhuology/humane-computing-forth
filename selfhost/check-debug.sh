@@ -67,6 +67,13 @@ require_text '0 0 7 '
 output=$(printf "' debug.dump DEBUG !\n11 22 >r\ntrap\ndepth . rdepth . 7 ." | "$runtime")
 require_text '| 000000000000000B |'
 require_text 'Forth return stack (R12, top first): 0000000000000016 '
+require_text 'Data stack (top) | FP stack (top)   | Return stack (RSP)'
+require_text '0 0 7 '
+
+# Captured FP values sit between the data and native return columns, top first.
+output=$(printf "' debug.dump DEBUG !\n1.5 2.25 trap\nfdepth . depth . 7 .\n" | "$runtime")
+require_text ' |                  |             2.25 |'
+require_text ' |                  |              1.5 |'
 require_text '0 0 7 '
 
 output=$(printf "' debug.dump DEBUG !\n0 DEBUG ! trap\n42 .\n" | "$runtime")

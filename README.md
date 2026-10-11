@@ -119,9 +119,9 @@ then Enter to search; `n` finds the next match; Enter or Right opens `see`.
 
 ### Debugger
 
-`debug.on` installs a post-fault hook that prints registers, data and return
-stacks, and the source window around the faulting instruction.  On a terminal,
-arrow keys navigate the native call stack.
+`debug.on` installs a post-fault hook that prints registers, the data,
+floating-point and return stacks, and the source window around the faulting
+instruction.  On a terminal, arrow keys navigate the native call stack.
 
     ./forth debug.on trap
 

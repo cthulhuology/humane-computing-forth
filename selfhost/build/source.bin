@@ -3456,6 +3456,9 @@ variable debug.limit
 \ Number of captured data-stack cells available to display.
 variable debug.data.count
 
+\ Number of captured floating-point values available to display.
+variable debug.float.count
+
 \ Number of captured native return-stack cells available to display.
 variable debug.frame.count
 
@@ -3635,7 +3638,23 @@ variable source.window.cursor
   dup 17 = if drop registers.rip s" RIP " ; then
   drop registers.rip s" RIP " ;
 
-\ Render register, data-stack cell, raw native return address, and translated word.
+\ Print one captured IEEE double in a sixteen-column field.
+: debug.float.cell ( bits -- )
+  ffi.frame ffi.frame.size erase
+  s" snprintf" ffi.service ffi.frame ffi.frame.function + !
+  ffi.frame ffi.frame.sse + ! 1 ffi.frame ffi.frame.sse.count + !
+  context context.scratch + ffi.frame ffi.frame.integer + !
+  64 ffi.frame ffi.frame.integer + 8 + !
+  s" %16.8g" c.string dup >r ffi.frame ffi.frame.integer + 16 + !
+  ffi.native r> c.string.free
+  ffi.frame ffi.frame.result.integer + @ c.int
+  dup 16 > if drop 16 then
+  dup 0 > if
+    16 over - debug.spaces
+    context context.scratch + swap type
+  else drop 16 debug.spaces then ;
+
+\ Render register, data and floating-point cells, native return address, and word.
 : debug.table.row
   tui.active @ if tui.row.begin
     debug.first @ debug.row @ + debug.selected @ =
@@ -3647,6 +3666,10 @@ variable source.window.cursor
     fault.context fault.data.offset + debug.data.count @ 1- debug.row @ - cells + @ debug.hex
   else 16 debug.spaces then
   s"  | " type
+  debug.row @ debug.float.count @ < if
+    fault.context fault.float.offset + debug.float.count @ 1- debug.row @ - cells + @ debug.float.cell
+  else 16 debug.spaces then
+  s"  | " type
   debug.first @ debug.row @ + dup debug.frame.count @ < if
     dup debug.selected @ = if 62 else 32 then emit
     cells debug.frames @ + @ dup debug.hex s"  | " type
@@ -3654,12 +3677,13 @@ variable source.window.cursor
     1- debug.word
   else drop 17 debug.spaces s"  | " type then cr ;
 
-\ Print the table and source for the selected frame; all values are hexadecimal.
+\ Print registers, stacks and source for the selected frame.
+\ Integer cells are hexadecimal; floating-point values are sixteen-column decimals.
 : debug.render
   debug.interactive @ if 27 emit s" [H" type 27 emit s" [2J" type then
   s" Signal " type fault.number . s"  Address 0x" type fault.address debug.hex cr
   s" Registers and stacks:" tui.panel 1 tui.clip !
-  s" Register (hex)       | Data stack (top) | Return stack (RSP) | Word + offset" type cr
+  s" Register (hex)       | Data stack (top) | FP stack (top)   | Return stack (RSP) | Word + offset" type cr
   0 debug.row !
   begin debug.row @ 18 < while debug.table.row 1 debug.row +! repeat tui.panel.end
   s" Forth return stack (R12, top first): " type
@@ -3734,6 +3758,8 @@ variable source.window.cursor
 : debug.dump
   registers.rbp fault.register fault.context data.stack.offset + -
   dup 0 < if drop 0 then stack.size min 8 / debug.data.count !
+  fault.context fault.float.sp.field + @ fault.context float.stack.offset + -
+  dup 0 < if drop 0 then stack.size min 8 / debug.float.count !
   registers.rsp fault.register fault.context native.stack.offset + -
   dup 0 < if drop 0 then stack.size min
   dup fault.context fault.native.offset + + debug.frames !
